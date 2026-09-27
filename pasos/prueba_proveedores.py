@@ -293,6 +293,65 @@ def prueba_voz():
     igual([p["w"] for p in reparto["B1"]], ["Hola", "mundo"],
           "el reparto de siempre lee las marcas alineadas")
     igual([p["w"] for p in reparto["B2"]], ["desde", "aqui"], "y el segundo bloque")
+    vtt = ("WEBVTT\n\n00:00.000 --> 00:01.000\nHola mundo\n\n"
+           "00:01.000 --> 00:02.000\ndesde aqui\n")
+    marcas = voz.palabras_de_srt(vtt, "Hola mundo desde aqui")
+    igual([m["w"] for m in marcas], ["Hola", "mundo", "desde", "aqui"],
+          "el VTT de la ficha se reparte igual")
+    comprobar("genaipro.io/api/v1" in voz.API_BASE,
+              "la base por defecto es genaipro.io")
+    igual(voz.ESTABILIDAD, 0.75, "stability sale del OpenAPI")
+    igual(voz.SIMILITUD, 0.5, "y similarity tambien")
+
+    class Sesion:
+        def __init__(self):
+            self.posts = []
+            self.n = 0
+
+        def post(self, url, json=None, timeout=None):
+            self.posts.append((url, json))
+            return Respuesta(200, {"task_id": "tarea-1"})
+
+        def get(self, url, timeout=None):
+            if "media" in url:
+                return Respuesta(200, contenido=b"ID3falso")
+            self.n += 1
+            if self.n == 1:
+                return Respuesta(200, {"status": "processing", "result": ""})
+            return Respuesta(200, {
+                "status": "completed",
+                "result": "https://media.genaipro.io/audio/tarea-1.mp3",
+                "subtitle": "",
+            })
+
+    class AudioFalso:
+        def mp3_a_pcm(self, contenido):
+            return b"\x00\x00" * 20
+
+    anterior_audio, anterior_sueno, anterior_poll = voz._AUDIO, voz.time.sleep, voz.POLL_S
+    voz._AUDIO = AudioFalso()
+    voz.time.sleep = lambda *_a, **_k: None
+    voz.POLL_S = 0
+    try:
+        pcm, tarea = voz._locutar_trozo(
+            Sesion(), "Hola", {"voz_id": "v", "velocidad": "normal"})
+    finally:
+        voz._AUDIO, voz.time.sleep, voz.POLL_S = anterior_audio, anterior_sueno, anterior_poll
+    igual(tarea, "tarea-1", "el sondeo usa el task_id")
+    sesion = Sesion()
+    voz._AUDIO = AudioFalso()
+    voz.time.sleep = lambda *_a, **_k: None
+    voz.POLL_S = 0
+    try:
+        voz._locutar_trozo(sesion, "Hola", {"voz_id": "v", "velocidad": "normal"})
+    finally:
+        voz._AUDIO, voz.time.sleep, voz.POLL_S = anterior_audio, anterior_sueno, anterior_poll
+    url, cuerpo = sesion.posts[0]
+    comprobar(url.endswith("/labs/task") and "genaipro.io/api/v1" in url,
+              "la tarea se crea en genaipro.io /labs/task")
+    igual(cuerpo["stability"], 0.75, "el cuerpo manda stability 0.75")
+    igual(cuerpo["similarity"], 0.5, "y similarity 0.5")
+    comprobar(pcm, "y se baja el MP3 de result")
 
 
 def prueba_alineador():
@@ -342,8 +401,8 @@ def prueba_comprobar():
         comprobar(any("/v1/models" in u for _m, u in vistas), "y esa es la URL")
         ficha = comprobar_claves.probar_genaipro("abc")
         igual(ficha["estado"], "ok", "GenAI Pro se prueba con /labs/voices")
-        comprobar(any("labs/voices" in u for _m, u in vistas),
-                  "sin generar audio")
+        comprobar(any("genaipro.io" in u and "labs/voices" in u for _m, u in vistas),
+                  "sin generar audio, contra genaipro.io")
         ficha = comprobar_claves.probar_snapgen("")
         igual(ficha["estado"], "sin_clave", "sin clave no sale a la red")
     finally:

@@ -1,9 +1,12 @@
 """Voz con GenAI Pro (Labs), un revendedor de ElevenLabs.
 
-No devuelve el instante de cada palabra. El montaje lo necesita, asi que cada
-trozo se alinea en local con el texto que se le mando. Si el alineador no esta
-instalado, se pide el SRT y se reparte el tiempo de cada cue entre sus
-palabras: eso se marca como aproximado y se avisa.
+La ficha oficial (https://docs.genaipro.io/openapi.yaml, enlazada desde
+https://genaipro.io/docs-api) describe POST /v1/labs/task, el sondeo
+GET /v1/labs/task/{id} y el audio en `result`. No hay marcas de palabra ni
+alineado: el subtítulo, si se pide, es la URL de un VTT. El montaje necesita
+{"w","s","e"}, así que cada trozo se alinea en local con el texto que se le
+mandó. Si el alineador no está, se reparte ese VTT (o un SRT) entre las
+palabras del cue: eso se marca como aproximado y se avisa.
 
 `toma(texto, cfg, progreso)` devuelve (wav_bytes, duracion, palabras) con
 palabras `{"w","s","e"}` en segundos, igual que Cartesia.
@@ -17,10 +20,15 @@ import time
 
 import requests
 
-API_BASE = os.environ.get("GENAIPRO_BASE") or "https://genaipro.vn/api/v1"
+# El OpenAPI publica el servidor https://genaipro.io/api y las rutas /v1/labs/…
+# GENAIPRO_BASE ya incluye /api/v1, que es lo que se concatena con /labs/…
+API_BASE = os.environ.get("GENAIPRO_BASE") or "https://genaipro.io/api/v1"
 MODELO = os.environ.get("GENAIPRO_MODELO") or "eleven_multilingual_v2"
 MODELOS = ("eleven_multilingual_v2", "eleven_turbo_v2_5",
            "eleven_flash_v2_5", "eleven_v3")
+# Defectos del POST /v1/labs/task en el OpenAPI, no los del cliente antiguo.
+ESTABILIDAD = 0.75
+SIMILITUD = 0.5
 TOPE_TROZO = int(os.environ.get("GENAIPRO_MAX_CHARS") or 4000)
 POLL_S = 3.0
 MAX_ESPERA_S = 600.0
@@ -181,33 +189,84 @@ def _esperar_tarea(sesion, tarea):
     raise RuntimeError("GenAI Pro no ha terminado la toma a tiempo")
 
 
-def _subtitulo(sesion, tarea):
-    """Pide un SRT de cues cortos. Si ya existia, se lee la tarea."""
+def _bajar(sesion, url):
+    """El MP3 y el VTT viven en un CDN. Si el bearer estorba, se repite sin el."""
+    respuesta = sesion.get(url, timeout=120)
+    if respuesta.status_code == 200 and respuesta.content:
+        return respuesta
+    return requests.get(url, timeout=120)
+
+
+def _texto_subtitulo(respuesta):
+    """El POST puede devolver el VTT, su URL, o nada y dejarlo en la tarea."""
+    if respuesta is None or respuesta.status_code not in (200, 201):
+        return ""
+    texto = (respuesta.text or "").lstrip()
+    if texto.startswith("WEBVTT") or "-->" in texto[:400]:
+        return respuesta.text
     try:
-        sesion.post(
+        cuerpo = respuesta.json()
+    except ValueError:
+        return ""
+    if not isinstance(cuerpo, dict):
+        return ""
+    sub = cuerpo.get("subtitle") or ""
+    if isinstance(sub, str) and sub.strip() and not sub.startswith("http"):
+        return sub
+    return ""
+
+
+def _subtitulo(sesion, tarea):
+    """Pide el subtítulo. En la ficha oficial `subtitle` es la URL de un VTT."""
+    try:
+        respuesta = sesion.post(
             f"{API_BASE}/labs/task/subtitle/{tarea}",
             json={"max_characters_per_line": 42, "max_lines_per_cue": 1,
                   "max_seconds_per_cue": 2},
             timeout=60)
     except requests.RequestException:
-        return ""
-    cuerpo = _esperar_tarea(sesion, tarea)
-    sub = cuerpo.get("subtitle") or ""
-    if isinstance(sub, str) and sub.startswith("http"):
-        bajada = sesion.get(sub, timeout=60)
-        if bajada.status_code == 200:
-            return bajada.text
-        return ""
-    return str(sub or "")
+        respuesta = None
+    directo = _texto_subtitulo(respuesta)
+    if directo:
+        return directo
+    limite = time.monotonic() + MAX_ESPERA_S
+    while time.monotonic() < limite:
+        try:
+            respuesta = sesion.get(f"{API_BASE}/labs/task/{tarea}", timeout=60)
+        except requests.RequestException:
+            time.sleep(POLL_S)
+            continue
+        if respuesta.status_code != 200:
+            time.sleep(POLL_S)
+            continue
+        try:
+            cuerpo = respuesta.json()
+        except ValueError:
+            time.sleep(POLL_S)
+            continue
+        estado = str(cuerpo.get("status") or "").lower()
+        if estado in ("failed", "error"):
+            return ""
+        sub = cuerpo.get("subtitle") or ""
+        if isinstance(sub, str) and sub.startswith("http"):
+            bajada = _bajar(sesion, sub)
+            if bajada.status_code == 200 and bajada.text:
+                return bajada.text
+            return ""
+        if isinstance(sub, str) and sub.strip():
+            return sub
+        time.sleep(POLL_S)
+    return ""
 
 
+# SRT (hh:mm:ss,mmm) y VTT (mm:ss.mmm o hh:mm:ss.mmm). La ficha de ejemplo es VTT.
 _CUE = re.compile(
-    r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
-    r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})")
+    r"(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
+    r"(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})")
 
 
 def _reloj(h, m, s, ms):
-    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+    return int(h or 0) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
 def palabras_de_srt(srt, texto):
@@ -290,8 +349,8 @@ def _locutar_trozo(sesion, texto, cfg):
         "voice_id": cfg["voz_id"],
         "model_id": _modelo(cfg),
         "speed": _velocidad(cfg),
-        "stability": 0.5,
-        "similarity": 0.75,
+        "stability": ESTABILIDAD,
+        "similarity": SIMILITUD,
         "style": 0.0,
         "use_speaker_boost": True,
     }
@@ -309,7 +368,7 @@ def _locutar_trozo(sesion, texto, cfg):
     url = ficha.get("result") or ""
     if not url:
         raise RuntimeError("GenAI Pro ha terminado la tarea sin MP3")
-    bajada = sesion.get(url, timeout=120)
+    bajada = _bajar(sesion, url)
     if bajada.status_code != 200 or not bajada.content:
         raise RuntimeError(f"no se ha podido bajar el MP3 (HTTP {bajada.status_code})")
     pcm = audio().mp3_a_pcm(bajada.content)

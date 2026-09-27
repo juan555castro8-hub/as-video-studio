@@ -164,7 +164,7 @@ def probar_genaipro(clave):
     """GET /labs/voices?page_size=1. No sintetiza nada."""
     if not clave:
         return _ficha("genaipro", "sin_clave", "no hay clave de GenAI Pro puesta")
-    base = (os.environ.get("GENAIPRO_BASE") or "https://genaipro.vn/api/v1").rstrip("/")
+    base = (os.environ.get("GENAIPRO_BASE") or "https://genaipro.io/api/v1").rstrip("/")
     respuesta, fallo = _pedir(
         "GET", f"{base}/labs/voices",
         params={"page_size": 1},

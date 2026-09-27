@@ -2472,9 +2472,9 @@ function seccionProveedores(ficha) {
   caja.appendChild(h('div', { clase: 'campo proveedor-elige' },
     h('label', {}, 'Voz'), voz));
   caja.appendChild(campoClaveProveedor(ficha, 'genaipro', 'Clave de GenAI Pro',
-    'genaipro.vn, Labs. Las marcas de palabra salen de un alineador local; '
-    + 'sin él se reparte el subtítulo y se avisa. El precio por carácter no '
-    + 'está en las tarifas: el gasto sale como «sin tarifa».'));
+    'genaipro.io, Labs. La API no da el instante de cada palabra: lo saca un '
+    + 'alineador local y, si no está, se reparte el subtítulo y se avisa. El '
+    + 'precio por carácter no está en las tarifas: el gasto sale como «sin tarifa».'));
   return caja;
 }
 
