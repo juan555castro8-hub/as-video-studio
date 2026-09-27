@@ -152,3 +152,30 @@ def tabla_de_costes(tamano=TAMANO):
         fila["veces_imagen"] = (round(fila["usd_imagen"] / base["usd_imagen"], 1)
                                 if base["usd_imagen"] else 0.0)
     return filas
+
+
+#: SnapGen no tiene el campo quality de OpenAI. La calidad del estudio se
+#: traduce al escalon que cobra: baja y media a 1K, alta a 2K.
+RESOLUCION_SNAPGEN = {"low": "1K", "medium": "1K", "high": "2K"}
+
+
+def tabla_snapgen():
+    """Lo que cobra SnapGen por imagen entregada. Las referencias no se suman."""
+    filas = []
+    for calidad in CALIDADES:
+        resolucion = RESOLUCION_SNAPGEN[calidad]
+        usd = COSTE.tarifa_snapgen(resolucion)
+        numero = 0.0 if usd is None else float(usd)
+        filas.append({
+            "calidad": calidad,
+            "resolucion": resolucion,
+            "usd_imagen": round(numero, 4),
+            "usd_referencias": 0.0,
+            "usd_total": round(numero, 4),
+            "sin_tarifa": usd is None,
+        })
+    base = filas[0]["usd_total"]
+    for fila in filas:
+        fila["veces_total"] = (round(fila["usd_total"] / base, 1) if base else 0.0)
+        fila["veces_imagen"] = fila["veces_total"]
+    return filas

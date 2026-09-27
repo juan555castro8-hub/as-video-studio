@@ -63,9 +63,10 @@ RUTA_GLOBAL = (os.environ.get("ESTUDIO_COSTE_GLOBAL")
                or os.path.join(RAIZ_ESTUDIO, "coste_global.jsonl"))
 NOMBRE_COSTE = "coste.jsonl"
 
-PROVEEDORES = ("openai", "tts", "claude_cli")
+PROVEEDORES = ("openai", "snapgen", "tts", "claude_cli")
 SIN_DOLARES = ("claude_cli",)            # se miden en tokens y no suman al total
-ETIQUETAS = {"openai": "OpenAI", "tts": "TTS", "claude_cli": "Claude"}
+ETIQUETAS = {"openai": "OpenAI", "snapgen": "SnapGen", "tts": "TTS",
+             "claude_cli": "Claude"}
 
 AVISO_PRESUPUESTO = 0.8                  # fraccion a partir de la cual se avisa
 
@@ -146,9 +147,22 @@ def tarifa_tokens():
             for clave in ("entrada_texto", "entrada_imagen", "salida")}
 
 
-def tarifa_caracter():
-    """USD por caracter sintetizado, o None mientras no se conozca el plan."""
+def tarifa_caracter(proveedor="cartesia"):
+    """USD por caracter, o None si el plan de ese proveedor no esta tarifado.
+
+    Cartesia vive en el bloque `tts`. GenAI Pro vive en `genaipro` y, mientras
+    no se rellene `usd_por_caracter`, el medidor dice sin tarifa en vez de
+    inventar un numero.
+    """
+    if str(proveedor or "") == "genaipro":
+        return _numero((tarifas().get("genaipro") or {}).get("usd_por_caracter"))
     return _numero((tarifas().get("tts") or {}).get("usd_por_caracter"))
+
+
+def tarifa_snapgen(resolucion):
+    """USD por imagen entregada de SnapGen en ese escalon, o None."""
+    tabla = (tarifas().get("snapgen") or {}).get("usd_por_imagen") or {}
+    return _numero(tabla.get(str(resolucion or "1K")))
 
 
 def coste_openai(usage, tamano, calidad, imagenes=1):
@@ -425,12 +439,31 @@ def cabecera(proveedores, total_usd):
     abierto = proveedores.get("openai") or _vacio("openai")
     voz = proveedores.get("tts") or _vacio("tts")
     cli = proveedores.get("claude_cli") or _vacio("claude_cli")
-    return "     ".join([
+    lineas = [
         f"OpenAI  {importe(abierto)} · {corto(abierto['tokens']['total'])} tok",
+    ]
+    snap = proveedores.get("snapgen") or _vacio("snapgen")
+    if (snap.get("usd") or 0) or (snap.get("cantidad") or {}).get("imagenes"):
+        lineas.append(
+            f"SnapGen  {importe(snap)} · {snap['cantidad']['imagenes']} img")
+    lineas.extend([
         f"TTS  {importe(voz)} · {corto(voz['cantidad']['caracteres'])} car",
         f"Claude  {corto(cli['tokens']['total'])} tok",
         f"TOTAL  ${total_usd:.2f}",
     ])
+    return "     ".join(lineas)
+
+
+def _proveedor_voz_activo():
+    """cartesia o genaipro, segun las claves. Si no se pueden leer, Cartesia."""
+    try:
+        import claves
+    except ImportError:
+        return "cartesia"
+    try:
+        return claves.proveedor_voz()
+    except Exception:  # noqa: BLE001
+        return "cartesia"
 
 
 def agregar(registros):
@@ -449,7 +482,8 @@ def agregar(registros):
         "total_usd": total,
         "moneda": "USD",
         "proveedores": proveedores,
-        "tarifa_caracter": tarifa_caracter(),
+        "tarifa_caracter": tarifa_caracter(_proveedor_voz_activo()),
+        "proveedor_voz": _proveedor_voz_activo(),
         "cabecera": cabecera(proveedores, total),
         "ultimo": max(momentos) if momentos else "",
     }
@@ -606,11 +640,29 @@ def reportar_openai(usage, calidad, tamano, imagenes=1, operacion="imagen",
                    usd_estimado=True, detalle=ficha)
 
 
+def reportar_snapgen(resolucion, imagenes=1, operacion="imagen", unidad=None,
+                     detalle=None):
+    """Una imagen de SnapGen, a su tarifa por escalon y no a la de tokens."""
+    precio = tarifa_snapgen(resolucion)
+    ficha = {"resolucion": resolucion, "proveedor": "snapgen", "via": "imagen"}
+    ficha.update(detalle or {})
+    return _anotar("snapgen", operacion, unidad=unidad,
+                   cantidad={"imagenes": int(imagenes or 1)},
+                   usd=None if precio is None else precio * int(imagenes or 1),
+                   usd_estimado=True, detalle=ficha)
+
+
 def reportar_tts(caracteres, operacion="sintesis", unidad=None, tokens=None,
                  detalle=None):
-    """Anota una sintesis con los caracteres que el motor de voz envio de verdad."""
+    """Anota una sintesis con los caracteres que el motor de voz envio de verdad.
+
+    `detalle['proveedor']` elige la tarifa: cartesia (el bloque tts) o genaipro.
+    """
     caracteres = int(caracteres or 0)
-    precio = tarifa_caracter()
+    detalle = dict(detalle or {})
+    cual = detalle.get("proveedor") or "cartesia"
+    detalle.setdefault("proveedor", cual)
+    precio = tarifa_caracter(cual)
     return _anotar("tts", operacion, unidad=unidad,
                    tokens=tokens, cantidad={"caracteres": caracteres},
                    usd=None if precio is None else precio * caracteres,
@@ -702,7 +754,8 @@ def _medir_toma_real(original):
         reportar_tts(len(texto or ""), operacion="toma",
                      detalle={"modelo": cfg.get("modelo"),
                               "voz_id": cfg.get("voz_id"),
-                              "idioma": cfg.get("idioma")})
+                              "idioma": cfg.get("idioma"),
+                              "proveedor": cfg.get("proveedor") or "cartesia"})
         return resultado
     return medido
 
@@ -729,7 +782,8 @@ def _medir_toma_por_contexto(original):
                      detalle={"modelo": cfg.get("modelo"),
                               "voz_id": cfg.get("voz_id"),
                               "idioma": cfg.get("idioma"),
-                              "secciones": len(piezas)})
+                              "secciones": len(piezas),
+                              "proveedor": cfg.get("proveedor") or "cartesia"})
         return resultado
     return medido
 
@@ -750,10 +804,16 @@ def _medir_imagen(original):
         meta = meta if isinstance(meta, dict) else {}
         calidad = kwargs.get("quality") or meta.get("quality") or "low"
         tamano = meta.get("tamano") or kwargs.get("tamano") or "apaisado"
-        registro = reportar_openai(meta.get("usage"), calidad, tamano,
-                                   detalle={"modelo": meta.get("modelo"),
-                                            "refs": meta.get("refs"),
-                                            "segundos": meta.get("segundos")})
+        if meta.get("proveedor") == "snapgen":
+            registro = reportar_snapgen(
+                meta.get("resolucion") or "1K",
+                detalle={"modelo": meta.get("modelo"), "refs": meta.get("refs"),
+                         "segundos": meta.get("segundos"), "tamano": tamano})
+        else:
+            registro = reportar_openai(meta.get("usage"), calidad, tamano,
+                                       detalle={"modelo": meta.get("modelo"),
+                                                "refs": meta.get("refs"),
+                                                "segundos": meta.get("segundos")})
         # Y EL IMPORTE DE VERDAD SE DEVUELVE, no solo se anota.
         #
         # El motor trae en `meta["coste"]` el precio de su TABLA POR IMAGEN
@@ -819,6 +879,8 @@ def instrumentar(pasos=None):
     voz = getattr(pasos, "p4_voz", None)
     if voz is not None:
         _envolver(voz, "_toma_real", _medir_toma_real, informe, "voz.toma_real")
+        _envolver(voz, "_toma_genaipro", _medir_toma_real, informe,
+                  "voz.toma_genaipro")
         _envolver(voz, "_toma_por_contexto", _medir_toma_por_contexto, informe,
                   "voz.toma_por_contexto")
         _envolver(voz, "previsualizar", _medir_previsualizacion, informe,
@@ -853,7 +915,10 @@ def instrumentar(pasos=None):
                   "assets.producir_imagen")
 
     for modulo in modulos_de_imagen(pasos):
-        _envolver(modulo, "generar", _medir_imagen, informe, "imagen_openai.generar")
+        fichero = str(getattr(modulo, "__file__", "") or "").replace("/", os.sep)
+        etiqueta = ("imagen_snapgen.generar" if "imagen_snapgen" in fichero
+                    else "imagen_openai.generar")
+        _envolver(modulo, "generar", _medir_imagen, informe, etiqueta)
 
     # Y se queda apuntado para volver a engancharse si medios RECARGA un motor.
     # Sin esto, recargar imagen.py deja un objeto modulo nuevo cuya `generar` no
@@ -883,8 +948,15 @@ def _reenganchar(clave, modulo):
     """Vuelve a medir un motor que se acaba de (re)cargar."""
     if os.path.basename(str(clave)).lower() != "imagen.py":
         return
+    texto = str(clave).replace("/", os.sep)
+    if "imagen_snapgen" in texto:
+        etiqueta = "imagen_snapgen.generar"
+    elif "imagen_openai" in texto:
+        etiqueta = "imagen_openai.generar"
+    else:
+        return
     _envolver(modulo, "generar", _medir_imagen,
-              {"enganchado": [], "ausente": []}, "imagen_openai.generar")
+              {"enganchado": [], "ausente": []}, etiqueta)
 
 
 def modulos_de_imagen(pasos=None):
@@ -904,16 +976,18 @@ def modulos_de_imagen(pasos=None):
     for medios in candidatos:
         if medios is None or not hasattr(medios, "motor"):
             continue
-        try:
-            modulo = medios.motor("imagen_openai/imagen.py")
-        except Exception:  # noqa: BLE001
-            continue
-        if modulo not in modulos:
-            modulos.append(modulo)
+        for ruta in ("imagen_openai/imagen.py", "imagen_snapgen/imagen.py"):
+            try:
+                modulo = medios.motor(ruta)
+            except Exception:  # noqa: BLE001
+                continue
+            if modulo not in modulos:
+                modulos.append(modulo)
     for modulo in list(sys.modules.values()):
         fichero = getattr(modulo, "__file__", "") or ""
+        normal = fichero.replace("/", os.sep)
         if os.path.basename(fichero).lower() == "imagen.py" and \
-                "imagen_openai" in fichero.replace("/", os.sep) and \
+                ("imagen_openai" in normal or "imagen_snapgen" in normal) and \
                 modulo not in modulos:
             modulos.append(modulo)
     return modulos

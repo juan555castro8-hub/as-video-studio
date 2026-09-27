@@ -432,7 +432,7 @@ def generar(referencias, estilo, ejes=None, peticiones=None, calidad="medium",
     cualquier video que lo use, asi que ahorrar aqui es ahorrar en el sitio
     equivocado.
     """
-    imagen = medios.motor("imagen_openai/imagen.py")
+    imagen = medios.motor_imagen()
     reglas = medios.motor("reglas/reglas.py")
     avisar = avisar or (lambda *a, **k: None)
     rutas = [r for r in (referencias or []) if os.path.exists(r)]
@@ -682,7 +682,7 @@ def dibujar_desde_guia(estilo, destino, ejes=None, calidad="medium",
     lamina con su descripcion generica de siempre, pagaba la imagen y devolvia
     otra vez lo mismo, con la correccion dada por aplicada.
     """
-    imagen = medios.motor("imagen_openai/imagen.py")
+    imagen = medios.motor_imagen()
     reglas = medios.motor("reglas/reglas.py")
     avisar = avisar or (lambda *a, **k: None)
     pedidos = [e for e in (ejes or EJES) if e in EJES]
@@ -716,8 +716,9 @@ def dibujar_desde_guia(estilo, destino, ejes=None, calidad="medium",
             con_lamina=False,
             encabezado="Produce one single full-frame image for a style "
                        "reference sheet.")
-        # SIN referencias: no hay ninguna que mandar, y mandar una lamina vacia
-        # es lo que provoca el "Unsupported content type" que no dice nada.
+        # SIN referencias: texto solo. OpenAI va a /images/generations y
+        # SnapGen acepta el plano sin image_urls. Una lamina vacia era lo que
+        # provocaba el "Unsupported content type".
         png, meta = imagen.generar(prompt, [], quality=calidad,
                                    tamano="apaisado")
         ruta = os.path.join(destino, f"{eje}.png")

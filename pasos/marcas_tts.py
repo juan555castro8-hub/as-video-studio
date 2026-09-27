@@ -252,6 +252,34 @@ def _formatear(valor):
 
 # ------------------------------------------------------------------- limpiar
 
+_BREAK_GENAI = re.compile(
+    r"""<break\s+time=["'](\d+(?:\.\d+)?)(ms|s)["']\s*/>""", re.I)
+_OTRA_ETIQUETA = re.compile(
+    r"</?(?:speed|volume|emotion|spell)\b[^>]*>", re.I)
+
+
+def para_genaipro(texto, avisos=None):
+    """Pasa las pausas a la forma de ElevenLabs y quita el resto.
+
+    Cartesia quiere `<break time="1200ms"/>`. GenAI Pro (ElevenLabs) quiere
+    `<break time="1.2s"/>` y locuta en voz alta cualquier otra etiqueta.
+    """
+    avisos = avisos if avisos is not None else []
+
+    def cambio(encaje):
+        numero = float(encaje.group(1))
+        if encaje.group(2).lower() == "ms":
+            numero = numero / 1000.0
+        numero = max(0.1, min(3.0, numero))
+        return f'<break time="{numero:.1f}s"/>'
+
+    salida = _BREAK_GENAI.sub(cambio, str(texto or ""))
+    if _OTRA_ETIQUETA.search(salida):
+        avisos.append("GenAI Pro solo admite pausas; se han quitado las demas etiquetas")
+        salida = _OTRA_ETIQUETA.sub("", salida)
+    return salida
+
+
 def limpiar(texto):
     """El texto tal y como se OYE: sin etiquetas y sin dobles espacios.
 

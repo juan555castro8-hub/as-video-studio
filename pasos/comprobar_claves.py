@@ -8,7 +8,9 @@ descubren a mitad de una tanda de imagenes, que es la forma cara.
 Aqui cada proveedor tiene su prueba, elegida para que NO cueste dinero:
 
     openai     GET /v1/models              autentica; no genera nada
+    snapgen    GET /v1/models              autentica; no genera nada
     cartesia   GET /voices                 lista voces; no sintetiza nada
+    genaipro   GET /labs/voices?page_size=1   lista una voz; no sintetiza
     jamendo    GET /tracks/?limit=1        una busqueda; el plan es gratuito
     freesound  GET /search/text/?page_size=1   idem
     claude     salud_cli.probar por cuenta  (haiku, una palabra: es lo minimo)
@@ -119,6 +121,28 @@ def probar_openai(clave):
                                    f"{_texto_corto(respuesta)}")
 
 
+def probar_snapgen(clave):
+    """GET /v1/models. No genera ninguna imagen."""
+    if not clave:
+        return _ficha("snapgen", "sin_clave", "no hay clave de SnapGen puesta")
+    respuesta, fallo = _pedir(
+        "GET", "https://api.snapgen.org/v1/models",
+        headers={"Authorization": f"Bearer {clave}"})
+    if respuesta is None:
+        return _ficha("snapgen", "sin_red",
+                      f"no se ha podido hablar con SnapGen: {fallo}")
+    if respuesta.status_code == 200:
+        return _ficha("snapgen", "ok",
+                      "la clave autentica. El saldo se mira en snapgen.org: "
+                      "esta llamada no genera nada y no lo dice")
+    if respuesta.status_code == 401:
+        return _ficha("snapgen", "mal", "SnapGen no reconoce la clave (401)")
+    if respuesta.status_code == 402:
+        return _ficha("snapgen", "mal", "SnapGen dice que no hay saldo (402)")
+    return _ficha("snapgen", "mal",
+                  f"SnapGen contesta {respuesta.status_code}: {_texto_corto(respuesta)}")
+
+
 def probar_cartesia(clave):
     if not clave:
         return _ficha("cartesia", "sin_clave", "no hay clave de Cartesia puesta")
@@ -134,6 +158,27 @@ def probar_cartesia(clave):
                                          f"({respuesta.status_code}): {_texto_corto(respuesta)}")
     return _ficha("cartesia", "mal", f"Cartesia contesta {respuesta.status_code}: "
                                      f"{_texto_corto(respuesta)}")
+
+
+def probar_genaipro(clave):
+    """GET /labs/voices?page_size=1. No sintetiza nada."""
+    if not clave:
+        return _ficha("genaipro", "sin_clave", "no hay clave de GenAI Pro puesta")
+    base = (os.environ.get("GENAIPRO_BASE") or "https://genaipro.vn/api/v1").rstrip("/")
+    respuesta, fallo = _pedir(
+        "GET", f"{base}/labs/voices",
+        params={"page_size": 1},
+        headers={"Authorization": f"Bearer {clave}"})
+    if respuesta is None:
+        return _ficha("genaipro", "sin_red",
+                      f"no se ha podido hablar con GenAI Pro: {fallo}")
+    if respuesta.status_code == 200:
+        return _ficha("genaipro", "ok", "la clave autentica y el catalogo de voces contesta")
+    if respuesta.status_code in (401, 403):
+        return _ficha("genaipro", "mal",
+                      f"GenAI Pro no reconoce la clave ({respuesta.status_code})")
+    return _ficha("genaipro", "mal",
+                  f"GenAI Pro contesta {respuesta.status_code}: {_texto_corto(respuesta)}")
 
 
 def probar_jamendo(clave):
@@ -203,7 +248,9 @@ def probar_todas(cuentas_claude=(), con_claude=True):
         for proveedor, puesta in (("openai", bool(almacen["openai"])),
                                   ("cartesia", bool(almacen["cartesia"]["clave"])),
                                   ("jamendo", bool(almacen["jamendo"]["clave"])),
-                                  ("freesound", bool(almacen["freesound"]["clave"]))):
+                                  ("freesound", bool(almacen["freesound"]["clave"])),
+                                  ("snapgen", bool(almacen["snapgen"])),
+                                  ("genaipro", bool(almacen["genaipro"]["clave"]))):
             fichas.append(_ficha(proveedor, "ok" if puesta else "sin_clave",
                                  "simulado" if puesta else "sin poner"))
         if con_claude:
@@ -214,6 +261,8 @@ def probar_todas(cuentas_claude=(), con_claude=True):
         (probar_cartesia, almacen["cartesia"]["clave"]),
         (probar_jamendo, almacen["jamendo"]["clave"]),
         (probar_freesound, almacen["freesound"]["clave"]),
+        (probar_snapgen, almacen["snapgen"][0]["clave"] if almacen["snapgen"] else ""),
+        (probar_genaipro, almacen["genaipro"]["clave"]),
     )
     for funcion, clave in pruebas:
         try:
@@ -231,7 +280,8 @@ def probar_todas(cuentas_claude=(), con_claude=True):
     return fichas
 
 
-NOMBRES = {"openai": "OpenAI (imágenes)", "cartesia": "Cartesia (voz)",
+NOMBRES = {"openai": "OpenAI (imágenes)", "snapgen": "SnapGen (imágenes)",
+           "cartesia": "Cartesia (voz)", "genaipro": "GenAI Pro (voz)",
            "jamendo": "Jamendo (música)", "freesound": "FreeSound (efectos)",
            "claude": "Claude"}
 

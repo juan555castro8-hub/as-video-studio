@@ -900,6 +900,30 @@ def _toma_real(texto, cfg, progreso):
     return motor.wav_desde_pcm(pcm), len(pcm) / (SR * 2), palabras
 
 
+def _proveedor_voz():
+    """cartesia o genaipro, el que este elegido en las claves."""
+    try:
+        from . import claves
+    except ImportError:
+        import claves
+    return claves.proveedor_voz()
+
+
+def _toma_genaipro(texto, cfg, progreso):
+    """La toma de GenAI Pro. Cartesia sigue en `_toma_real`."""
+    motor_g = comun.cargar_motor("voz_genaipro", "voz.py")
+    avisos = []
+    preparado = marcas_tts.para_genaipro(texto, avisos)
+    for aviso in avisos:
+        progreso(0.02, aviso)
+    wav, duracion, palabras = motor_g.toma(preparado, cfg, progreso)
+    _toma_genaipro.marcas = getattr(motor_g.toma, "marcas", "")
+    return wav, duracion, palabras
+
+
+_toma_genaipro.marcas = ""
+
+
 def sintetizar_toma(texto, cfg, progreso=None):
     """Una toma continua de un texto -> (wav, duracion, palabras)."""
     if not texto.strip():
@@ -908,6 +932,8 @@ def sintetizar_toma(texto, cfg, progreso=None):
     if simulado():
         avisa(0.5, "simulando toma")
         return _toma_simulada(texto, cfg)
+    if _proveedor_voz() == "genaipro":
+        return _toma_genaipro(texto, dict(cfg, proveedor="genaipro"), avisa)
     return _toma_real(texto, cfg, avisa)
 
 
@@ -996,7 +1022,14 @@ def sintetizar_bloques(bloques, destino, cfg, avisar=None,
     trozos = [" ".join(por_bloque[bid] for bid in sec["bloques"])
               for sec in secciones]
     wav = duracion = palabras = None
-    if len(trozos) > 1 and not simulado():
+    if _proveedor_voz() == "genaipro" and not simulado():
+        avisa(0.05, f"voz de GenAI Pro, {len(trozos)} secciones")
+        wav, duracion, palabras = _toma_genaipro(
+            texto, dict(cfg, proveedor="genaipro"), progreso)
+        if _toma_genaipro.marcas == "aproximadas":
+            avisa(0.86, "las marcas de palabra son aproximadas")
+        secciones = [{"id": "SB001", "bloques": [b["id"] for b in anotados]}]
+    elif len(trozos) > 1 and not simulado():
         avisa(0.05, f"{len(trozos)} secciones en un solo contexto")
         try:
             wav, duracion, palabras = _toma_por_contexto(trozos, cfg, progreso)
@@ -1057,6 +1090,7 @@ def sintetizar_bloques(bloques, destino, cfg, avisar=None,
         "secciones": _fichas_de_seccion(secciones, fichas),
         "marcas_tts": marcas_tts.resumen(anotados),
         "avisos_marcas": list(dict.fromkeys(avisos_marcas)),
+        "marcas": _toma_genaipro.marcas or "cartesia",
         "resumen": (f"{len(anotados)} bloques, {round(duracion, 1)}s, "
                     f"{cfg['modelo']} {cfg.get('preset') or 'sin preset'}"),
     }
@@ -1350,6 +1384,9 @@ def _hay_clave():
 
 
 def listar_voces(idioma=None, refrescar=False, solo_nativas=False):
+    if _proveedor_voz() == "genaipro":
+        return comun.cargar_motor("voz_genaipro", "voz.py").listar_voces(
+            idioma, refrescar, solo_nativas)
     """Catalogo de voces de Cartesia, cacheado en disco.
 
     El catalogo cambia poco y son varias paginas de red: se guarda en
@@ -1587,6 +1624,9 @@ def regrabar_seccion(bloques, seccion_id, cfg, meta, destino, peticion="",
 
     if simulado():
         wav_nuevo, dur_nueva, marcas_nuevas = _toma_simulada(trozo, cfg)
+    elif _proveedor_voz() == "genaipro":
+        wav_nuevo, dur_nueva, marcas_nuevas = _toma_genaipro(
+            trozo, dict(cfg, proveedor="genaipro"), progreso)
     else:
         wav_nuevo, dur_nueva, marcas_nuevas = _toma_por_contexto(
             [trozo], cfg, progreso)

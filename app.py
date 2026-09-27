@@ -1781,7 +1781,8 @@ def catalogo_voces_global(idioma: str = Query(default=None),
     except (Exception, SystemExit) as fallo:  # noqa: BLE001
         raise ErrorApi(502, f"no se ha podido leer el catalogo de voces: {fallo}")
     return {"voces": voces, "total": len(voces), "idioma": idioma,
-            "solo_nativas": bool(nativas or solo_nativas)}
+            "solo_nativas": bool(nativas or solo_nativas),
+            "proveedor": PASOS_MODULOS.claves.proveedor_voz()}
 
 
 # ------------------------------------------------------------ voz descrita
@@ -2355,8 +2356,10 @@ def coste_global(limite: int = Query(default=0)):
 @app.get("/api/coste/tarifas")
 def leer_tarifas():
     """Tabla de tarifas. Vive en un unico sitio: estudio/tarifas.json."""
+    voz = COSTE._proveedor_voz_activo()
     return {"tarifas": COSTE.tarifas(refrescar=True), "ruta": COSTE.RUTA_TARIFAS,
-            "usd_por_caracter": COSTE.tarifa_caracter()}
+            "usd_por_caracter": COSTE.tarifa_caracter(voz),
+            "proveedor_voz": voz}
 
 
 @app.put("/api/coste/tarifas")
@@ -2366,14 +2369,19 @@ def escribir_tarifas(cuerpo: dict = Body(default=None)):
     cambios = datos.get("tarifas") if isinstance(datos.get("tarifas"), dict) else datos
     if not cambios:
         raise ErrorApi(400, "no hay nada que cambiar en las tarifas")
+    voz = COSTE._proveedor_voz_activo()
     if "usd_por_caracter" in cambios:
-        # atajo comodo: lo unico que se rellena a mano es el precio de Cartesia
-        cambios = {"tts": {"usd_por_caracter": cambios["usd_por_caracter"]}}
+        # atajo de la pantalla: el precio por caracter del proveedor de voz
+        # que esta elegido. Cartesia vive en `tts`; GenAI Pro, en `genaipro`.
+        bloque = "genaipro" if voz == "genaipro" else "tts"
+        cambios = {bloque: {"usd_por_caracter": cambios["usd_por_caracter"]}}
     try:
         tabla = COSTE.guardar_tarifas(cambios)
     except (TypeError, OSError) as fallo:
         raise ErrorApi(400, f"no se han podido guardar las tarifas: {fallo}")
-    return {"tarifas": tabla, "usd_por_caracter": COSTE.tarifa_caracter()}
+    return {"tarifas": tabla,
+            "usd_por_caracter": COSTE.tarifa_caracter(voz),
+            "proveedor_voz": voz}
 
 
 # -------------------------------------------------------- ajustes del CLI
@@ -5423,6 +5431,7 @@ def leer_ajustes():
     return {"ajustes": AJUSTES.leer(),
             "calidades": list(AJUSTES.CALIDADES),
             "costes": AJUSTES.tabla_de_costes(),
+            "costes_snapgen": AJUSTES.tabla_snapgen(),
             "tamano": AJUSTES.TAMANO}
 
 
@@ -5445,7 +5454,8 @@ def guardar_ajustes(cuerpo: dict = Body(default=None)):
             and bool(guardados.get("subtitulos")) != bool(antes.get("subtitulos", True))):
         _propagar_subtitulos(bool(guardados.get("subtitulos")))
     anotar_global("ajustes_guardados", {"ajustes": guardados})
-    return {"ajustes": guardados, "costes": AJUSTES.tabla_de_costes()}
+    return {"ajustes": guardados, "costes": AJUSTES.tabla_de_costes(),
+            "costes_snapgen": AJUSTES.tabla_snapgen()}
 
 
 def _propagar_subtitulos(valor):
@@ -6110,7 +6120,7 @@ def _cuentas_de_imagen():
     panel de claves que revienta porque falta PIL no ayuda a nadie.
     """
     try:
-        motor = PASOS_MODULOS.medios.motor("imagen_openai/imagen.py")
+        motor = PASOS_MODULOS.medios.motor_imagen()
         return list(motor.cuentas_para_la_pantalla())
     except SystemExit as fallo:
         # UNA INSTALACION RECIEN HECHA NO TIENE NINGUNA CLAVE, y eso no es un

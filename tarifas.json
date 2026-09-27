@@ -31,6 +31,20 @@
     "plan": "Pro con overages",
     "nota": "Plan Pro (5 $/mes, 100.000 creditos incluidos) con overages a 65 $ por millon de creditos. En Sonic, 1 credito = 1 caracter, asi que el caracter de mas cuesta 0,000065 $. Se anota el coste MARGINAL a proposito: los 100.000 creditos incluidos ya estan pagados cada mes, y prorratear los 5 $ haria que el mismo video costara distinto segun cuanto se hubiera usado antes. Los eventos anotados antes de fijar esta tarifa no se reescriben: el historico anterior sigue sin importe."
   },
+  "snapgen": {
+    "modelo": "gpt-image-2.5-ext",
+    "usd_por_imagen": {
+      "1K": 0.0085,
+      "2K": 0.014,
+      "4K": 0.021
+    },
+    "nota": "Precio por imagen entregada, no por tokens. Las referencias no se cobran aparte. 1K es low y medium; 2K es high. 4K esta en la tabla por si se pide a mano y no lo elige el estudio solo."
+  },
+  "genaipro": {
+    "modelo": "eleven_multilingual_v2",
+    "usd_por_caracter": null,
+    "nota": "GenAI Pro no publica un precio por caracter que se pueda dejar fijo aqui. null significa que no se sabe: el medidor anota los caracteres y el importe sale como sin tarifa hasta que se rellene este campo."
+  },
   "claude_cli": {
     "suma_al_total": false,
     "nota": "Va contra la suscripcion, no contra un contador con precio por llamada: se miden tokens y nunca dolares."

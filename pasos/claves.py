@@ -83,6 +83,9 @@ CONSERVAR = "__CONSERVAR__"
 #: 401 y seguia con las demas: eso convertia una clave mal puesta en «va mas
 #: lento» en vez de en un error. Con una, si esta mal se dice y se para.
 MAX_OPENAI = 1
+MAX_SNAPGEN = 4
+PROVEEDORES_IMAGEN = ("openai", "snapgen")
+PROVEEDORES_VOZ = ("cartesia", "genaipro")
 
 #: Tope de cuentas del CLI. Aqui no lo impone ningun .env: lo impone que la
 #: cadena se recorre EN SERIE cuando falla, asi que cada cuenta de mas es una
@@ -109,6 +112,12 @@ def _vacio():
         "jamendo": {"clave": ""},
         "freesound": {"clave": ""},
         "claude_cli": {"cuentas": []},
+        # SnapGen (imagen) y GenAI Pro (voz). Vacios, el estudio sigue con
+        # OpenAI y Cartesia. En cuanto hay clave y nadie ha elegido, el
+        # proveedor por defecto pasa a ser el nuevo: ver proveedor_imagen.
+        "snapgen": [],
+        "genaipro": {"clave": ""},
+        "proveedores": {"imagen": "", "voz": ""},
     }
 
 
@@ -163,6 +172,33 @@ def _normalizar(datos):
         elif isinstance(cruda, str):
             base[suelta]["clave"] = cruda.strip()
     base["claude_cli"]["cuentas"] = _cuentas_cli_de(datos.get("claude_cli"))
+
+    cuentas_snap = []
+    for cruda in (datos.get("snapgen") or []):
+        if not isinstance(cruda, dict):
+            continue
+        clave = str(cruda.get("clave") or "").strip()
+        if not clave:
+            continue
+        cuentas_snap.append({
+            "id": str(cruda.get("id") or "").strip() or _nuevo_id(cuentas_snap, "snap"),
+            "etiqueta": str(cruda.get("etiqueta") or "").strip(),
+            "clave": clave,
+            "activa": cruda.get("activa") is not False,
+        })
+    base["snapgen"] = cuentas_snap[:MAX_SNAPGEN]
+
+    genaipro = datos.get("genaipro")
+    if isinstance(genaipro, dict):
+        base["genaipro"]["clave"] = str(genaipro.get("clave") or "").strip()
+    elif isinstance(genaipro, str):
+        base["genaipro"]["clave"] = genaipro.strip()
+
+    pedido = datos.get("proveedores") if isinstance(datos.get("proveedores"), dict) else {}
+    imagen = str(pedido.get("imagen") or "").strip().lower()
+    voz = str(pedido.get("voz") or "").strip().lower()
+    base["proveedores"]["imagen"] = imagen if imagen in PROVEEDORES_IMAGEN else ""
+    base["proveedores"]["voz"] = voz if voz in PROVEEDORES_VOZ else ""
     return base
 
 
@@ -241,6 +277,11 @@ def adoptar_env():
             datos["openai"].append({"id": f"cta{indice}", "etiqueta": "",
                                     "clave": clave, "activa": True})
     datos["cartesia"]["clave"] = valores.get("CARTESIA_API_KEY", "") or ""
+    snap = valores.get("SNAPGEN_API_KEY")
+    if snap:
+        datos["snapgen"].append({"id": "snap1", "etiqueta": "", "clave": snap,
+                                 "activa": True})
+    datos["genaipro"]["clave"] = valores.get("GENAIPRO_API_KEY", "") or ""
     datos["jamendo"]["clave"] = valores.get("JAMENDO_CLIENT_ID", "") or ""
     datos["freesound"]["clave"] = valores.get("FREESOUND_API_KEY", "") or ""
     return datos
@@ -345,7 +386,120 @@ def _fusionar(actual, peticion):
             peticion.get("claude_cli"), actual["claude_cli"]["cuentas"])
     else:
         salida["claude_cli"] = actual["claude_cli"]
+
+    if "snapgen" in peticion:
+        salida["snapgen"] = _cuentas_snap_pedidas(
+            peticion.get("snapgen"), actual["snapgen"])
+    else:
+        salida["snapgen"] = actual["snapgen"]
+
+    if "genaipro" in peticion:
+        ficha = peticion.get("genaipro")
+        clave = ficha.get("clave") if isinstance(ficha, dict) else ficha
+        clave = str(clave or "").strip()
+        if clave == CONSERVAR:
+            clave = actual["genaipro"]["clave"]
+        salida["genaipro"]["clave"] = clave
+    else:
+        salida["genaipro"] = actual["genaipro"]
+
+    if "proveedores" in peticion:
+        salida["proveedores"] = _proveedores_pedidos(
+            peticion.get("proveedores"), actual["proveedores"])
+    else:
+        salida["proveedores"] = actual["proveedores"]
     return salida
+
+
+def _cuentas_snap_pedidas(crudas, actuales):
+    if not isinstance(crudas, list):
+        raise ErrorClaves("'snapgen' tiene que ser una lista de cuentas")
+    if len(crudas) > MAX_SNAPGEN:
+        raise ErrorClaves(f"como mucho {MAX_SNAPGEN} claves de SnapGen")
+    por_id = {c["id"]: c for c in actuales}
+    cuentas = []
+    for cruda in crudas:
+        if not isinstance(cruda, dict):
+            raise ErrorClaves("cada cuenta de SnapGen es un objeto "
+                              "{etiqueta, clave}")
+        cid = str(cruda.get("id") or "").strip()
+        clave = str(cruda.get("clave") or "").strip()
+        if clave == CONSERVAR:
+            anterior = por_id.get(cid)
+            if anterior is None:
+                raise ErrorClaves(f"la cuenta '{cid}' pide conservar su clave "
+                                  f"de SnapGen y no hay ninguna guardada")
+            clave = anterior["clave"]
+        if not clave:
+            raise ErrorClaves("una cuenta de SnapGen sin clave no sirve")
+        if len(clave) < 8 or re.search(r"\s", clave):
+            raise ErrorClaves("eso no parece una clave de SnapGen")
+        cuentas.append({
+            "id": cid or _nuevo_id(cuentas, "snap"),
+            "etiqueta": str(cruda.get("etiqueta") or "").strip(),
+            "clave": clave,
+            "activa": cruda.get("activa") is not False,
+        })
+    return cuentas
+
+
+def _proveedores_pedidos(pedido, actual):
+    if not isinstance(pedido, dict):
+        raise ErrorClaves("'proveedores' tiene que ser un objeto "
+                          "{imagen, voz}")
+    salida = dict(actual)
+    if "imagen" in pedido:
+        valor = str(pedido.get("imagen") or "").strip().lower()
+        if valor not in ("",) + PROVEEDORES_IMAGEN:
+            raise ErrorClaves("el proveedor de imagen es openai o snapgen")
+        salida["imagen"] = valor
+    if "voz" in pedido:
+        valor = str(pedido.get("voz") or "").strip().lower()
+        if valor not in ("",) + PROVEEDORES_VOZ:
+            raise ErrorClaves("el proveedor de voz es cartesia o genaipro")
+        salida["voz"] = valor
+    return salida
+
+
+def _hay_clave_snapgen(datos):
+    if (os.environ.get("SNAPGEN_API_KEY") or "").strip():
+        return True
+    return any(c.get("clave") and c.get("activa", True) for c in datos["snapgen"])
+
+
+def _hay_clave_genaipro(datos):
+    if (os.environ.get("GENAIPRO_API_KEY") or "").strip():
+        return True
+    return bool(datos["genaipro"]["clave"])
+
+
+def proveedor_imagen(datos=None):
+    """openai o snapgen. El entorno manda; si nadie eligio y hay clave de
+    SnapGen, esa es la de la instalacion."""
+    entorno = (os.environ.get("ESTUDIO_PROVEEDOR_IMAGEN") or "").strip().lower()
+    if entorno in PROVEEDORES_IMAGEN:
+        return entorno
+    datos = datos if datos is not None else leer()
+    puesto = datos["proveedores"]["imagen"]
+    if puesto in PROVEEDORES_IMAGEN:
+        return puesto
+    if _hay_clave_snapgen(datos):
+        return "snapgen"
+    return "openai"
+
+
+def proveedor_voz(datos=None):
+    """cartesia o genaipro. Misma regla que las imagenes."""
+    entorno = (os.environ.get("ESTUDIO_PROVEEDOR_VOZ") or "").strip().lower()
+    if entorno in PROVEEDORES_VOZ:
+        return entorno
+    datos = datos if datos is not None else leer()
+    puesto = datos["proveedores"]["voz"]
+    if puesto in PROVEEDORES_VOZ:
+        return puesto
+    if _hay_clave_genaipro(datos):
+        return "genaipro"
+    return "cartesia"
 
 
 def _cuentas_cli_pedidas(crudo, actuales):
@@ -473,11 +627,17 @@ def espejar_env(datos=None):
         nuestras["JAMENDO_CLIENT_ID"] = datos["jamendo"]["clave"]
     if datos["freesound"]["clave"]:
         nuestras["FREESOUND_API_KEY"] = datos["freesound"]["clave"]
+    activas_snap = [c for c in datos.get("snapgen") or [] if c.get("activa")]
+    if activas_snap:
+        nuestras["SNAPGEN_API_KEY"] = activas_snap[0]["clave"]
+    if (datos.get("genaipro") or {}).get("clave"):
+        nuestras["GENAIPRO_API_KEY"] = datos["genaipro"]["clave"]
 
     # Los nombres que ESTA pantalla escribe. Lo que no este aqui se conserva tal
     # cual y en su orden: un .env puede tener cosas que nadie de aqui gestiona.
     gestionadas = {"OPENAI_API_KEY", "CARTESIA_API_KEY",
-                   "JAMENDO_CLIENT_ID", "FREESOUND_API_KEY"} | {
+                   "JAMENDO_CLIENT_ID", "FREESOUND_API_KEY",
+                   "SNAPGEN_API_KEY", "GENAIPRO_API_KEY"} | {
         f"OPENAI_API_KEY_{i}" for i in range(2, MAX_OPENAI + 1)}
 
     lineas, puestas = [], set()
@@ -549,6 +709,22 @@ def resumen(datos=None):
         "freesound": {
             "puesta": bool(datos["freesound"]["clave"]),
             "cola": tapar(datos["freesound"]["clave"]),
+        },
+        "snapgen": [{
+            "id": c["id"],
+            "etiqueta": c["etiqueta"],
+            "cola": tapar(c["clave"]),
+            "activa": c["activa"],
+        } for c in datos["snapgen"]],
+        "genaipro": {
+            "puesta": bool(datos["genaipro"]["clave"]),
+            "cola": tapar(datos["genaipro"]["clave"]),
+        },
+        "proveedores": {
+            "imagen": proveedor_imagen(datos),
+            "voz": proveedor_voz(datos),
+            "imagen_elegida": datos["proveedores"]["imagen"],
+            "voz_elegida": datos["proveedores"]["voz"],
         },
         "fichero": FICHERO,
         "max_openai": MAX_OPENAI,

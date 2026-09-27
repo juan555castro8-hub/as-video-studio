@@ -2433,6 +2433,12 @@ button.avisa:hover:not(:disabled) { border-color: var(--aviso); }
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
   margin: 4px 0 14px;
 }
+.proveedor-elige select {
+  background: var(--papel); color: inherit;
+  border: 1px solid var(--linea); border-radius: 6px;
+  padding: 6px 8px; min-height: var(--toque); max-width: 100%;
+}
+
 .montaje-mandos select {
   background: var(--papel); color: inherit;
   border: 1px solid var(--linea); border-radius: 6px;

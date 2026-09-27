@@ -2278,6 +2278,7 @@ function pintarConfig() {
     return;
   }
   caja.appendChild(bloquePruebaClaves());
+  caja.appendChild(seccionProveedores(ficha));
   caja.appendChild(seccionOpenAI(ficha));
   caja.appendChild(seccionCalidadImagen());
   caja.appendChild(seccionSubtitulos());
@@ -2312,7 +2313,8 @@ async function guardarCalidadImagen(calidad) {
   try {
     const r = await pedir(API.ajustes(),
                           { method: 'PUT', cuerpo: { calidad_imagen: calidad } });
-    vista.ajustes = { ...(vista.ajustes || {}), ajustes: r.ajustes, costes: r.costes };
+    vista.ajustes = { ...(vista.ajustes || {}), ajustes: r.ajustes,
+      costes: r.costes, costes_snapgen: r.costes_snapgen || (vista.ajustes || {}).costes_snapgen };
   } catch (e) {
     vista.error = e.message;
   }
@@ -2347,19 +2349,34 @@ function seccionCalidadImagen() {
     return caja;
   }
 
-  const base = datos.costes[0] || {};
-  const porcentaje = base.usd_total
+  const snap = (vista.ficha && vista.ficha.proveedores
+    && vista.ficha.proveedores.imagen) === 'snapgen';
+  const filas = snap ? (datos.costes_snapgen || datos.costes) : datos.costes;
+  const base = filas[0] || {};
+  const porcentaje = !snap && base.usd_total
     ? Math.round(100 * base.usd_referencias / base.usd_total) : 0;
-  caja.appendChild(h('div', { clase: 'pista' },
-    'Lo que se ve aqui NO es el precio de OpenAI: es lo que cuesta el plano '
-    + 'entero. A cada imagen se le adjuntan sus referencias de estilo, reparto y '
-    + `continuidad, y esas se pagan aparte — en la calidad baja son el ${porcentaje} % `
-    + 'del gasto. Por eso subir de calidad cuesta bastante menos de lo que '
-    + 'parece si solo se mira la tabla de precios.'));
+  caja.appendChild(h('div', { clase: 'pista' }, snap
+    ? 'SnapGen cobra la imagen entregada. Las referencias no se suman. '
+      + 'Baja y media salen a 1K; alta, a 2K. El número sale de tarifas.json.'
+    : 'Lo que se ve aqui NO es el precio de OpenAI: es lo que cuesta el plano '
+      + 'entero. A cada imagen se le adjuntan sus referencias de estilo, reparto y '
+      + `continuidad, y esas se pagan aparte — en la calidad baja son el ${porcentaje} % `
+      + 'del gasto. Por eso subir de calidad cuesta bastante menos de lo que '
+      + 'parece si solo se mira la tabla de precios.'));
 
   const elegida = datos.ajustes.calidad_imagen;
-  datos.costes.forEach(fila => {
+  filas.forEach(fila => {
     const puesta = fila.calidad === elegida;
+    const desglose = snap
+      ? (fila.sin_tarifa ? 'sin tarifa' : (fila.resolucion || ''))
+      : `${fila.usd_imagen.toFixed(3)} la imagen + ${fila.usd_referencias.toFixed(3)} `
+        + 'las referencias';
+    const veces = snap
+      ? (fila.sin_tarifa ? ''
+        : (fila.veces_total > 1 ? `×${fila.veces_total}` : '1K'))
+      : (fila.veces_total > 1
+        ? `×${fila.veces_total} de coste real, no ×${fila.veces_imagen}`
+        : 'la mas barata');
     caja.appendChild(h('button', {
       clase: 'fila-calidad' + (puesta ? ' elegida' : ''),
       disabled: puesta,
@@ -2368,14 +2385,12 @@ function seccionCalidadImagen() {
       onclick: () => guardarCalidadImagen(fila.calidad),
     },
       h('span', { clase: 'nombre' }, fila.calidad),
-      h('span', { clase: 'precio' },
-        `${fila.usd_total.toFixed(3)} $ por imagen`),
-      h('span', { clase: 'meta desglose' },
-        `${fila.usd_imagen.toFixed(3)} la imagen + ${fila.usd_referencias.toFixed(3)} `
-        + 'las referencias'),
-      h('span', { clase: 'meta veces' }, fila.veces_total > 1
-        ? `×${fila.veces_total} de coste real, no ×${fila.veces_imagen}`
-        : 'la mas barata')));
+      h('span', { clase: 'precio' }, fila.sin_tarifa
+        ? 'sin tarifa'
+        : `${(snap ? String(Math.round(fila.usd_total * 10000) / 10000)
+            : fila.usd_total.toFixed(3))} $ por imagen`),
+      h('span', { clase: 'meta desglose' }, desglose),
+      h('span', { clase: 'meta veces' }, veces)));
   });
 
   caja.appendChild(h('div', { clase: 'meta' },
@@ -2417,7 +2432,8 @@ async function guardarSubtitulos(valor) {
   try {
     const r = await pedir(API.ajustes(),
                           { method: 'PUT', cuerpo: { subtitulos: !!valor } });
-    vista.ajustes = { ...(vista.ajustes || {}), ajustes: r.ajustes, costes: r.costes };
+    vista.ajustes = { ...(vista.ajustes || {}), ajustes: r.ajustes,
+      costes: r.costes, costes_snapgen: r.costes_snapgen || (vista.ajustes || {}).costes_snapgen };
   } catch (e) {
     vista.error = e.message;
     toast(e.message, true);
@@ -2427,6 +2443,77 @@ async function guardarSubtitulos(valor) {
 
 
 /* Las cuentas de OpenAI: N, cada una con el correo de la suya. */
+function seccionProveedores(ficha) {
+  const prov = ficha.proveedores || { imagen: 'openai', voz: 'cartesia' };
+  const caja = h('section', { clase: 'bloque-config' },
+    h('h3', {}, 'Quién genera'),
+    h('div', { clase: 'pista' },
+      'OpenAI y Cartesia siguen disponibles. SnapGen hace las imágenes y '
+      + 'GenAI Pro la voz cuando se eligen. Si hay clave de los nuevos y '
+      + 'nadie ha elegido, esos son los que se usan.'));
+
+  const imagen = h('select', {
+    onchange: e => guardarClaves({ proveedores: { imagen: e.target.value } }),
+  },
+    h('option', { value: 'openai' }, 'OpenAI'),
+    h('option', { value: 'snapgen' }, 'SnapGen'));
+  imagen.value = prov.imagen || 'openai';
+  caja.appendChild(h('div', { clase: 'campo proveedor-elige' },
+    h('label', {}, 'Imágenes'), imagen));
+  caja.appendChild(campoClaveProveedor(ficha, 'snapgen', 'Clave de SnapGen',
+    'api.snapgen.org, modelo gpt-image-2.5-ext. No sustituye a OpenAI: se elige arriba.'));
+
+  const voz = h('select', {
+    onchange: e => guardarClaves({ proveedores: { voz: e.target.value } }),
+  },
+    h('option', { value: 'cartesia' }, 'Cartesia'),
+    h('option', { value: 'genaipro' }, 'GenAI Pro'));
+  voz.value = prov.voz || 'cartesia';
+  caja.appendChild(h('div', { clase: 'campo proveedor-elige' },
+    h('label', {}, 'Voz'), voz));
+  caja.appendChild(campoClaveProveedor(ficha, 'genaipro', 'Clave de GenAI Pro',
+    'genaipro.vn, Labs. Las marcas de palabra salen de un alineador local; '
+    + 'sin él se reparte el subtítulo y se avisa. El precio por carácter no '
+    + 'está en las tarifas: el gasto sale como «sin tarifa».'));
+  return caja;
+}
+
+function campoClaveProveedor(ficha, id, titulo, pista) {
+  const suelta = id === 'genaipro';
+  const puesta = suelta ? !!((ficha.genaipro || {}).puesta)
+    : ((ficha.snapgen || []).length > 0);
+  const cola = suelta ? ((ficha.genaipro || {}).cola || '')
+    : (puesta ? ficha.snapgen[0].cola : '');
+  const campo = h('input', {
+    type: 'password',
+    placeholder: puesta ? `puesta (${cola})` : 'sin poner',
+  });
+  return h('div', {},
+    h('div', { clase: 'fila' },
+      h('b', {}, titulo),
+      h('span', { clase: 'crece' }),
+      pastillaEstado(puesta ? 'ok' : 'vacio', puesta ? cola : 'sin poner')),
+    h('div', { clase: 'pista' }, pista),
+    h('div', { clase: 'fila-clave' }, campo,
+      h('button', {
+        clase: 'mini',
+        onclick: () => {
+          if (!campo.value.trim()) { toast('escribe la clave', true); return; }
+          const cuerpo = suelta
+            ? { genaipro: { clave: campo.value.trim() } }
+            : { snapgen: [{ etiqueta: '', clave: campo.value.trim(), activa: true }] };
+          guardarClaves(cuerpo);
+          campo.value = '';
+        },
+      }, 'Cambiar'),
+      (puesta ? h('button', {
+        clase: 'mini fantasma peligro',
+        onclick: () => guardarClaves(suelta
+          ? { genaipro: { clave: '' } }
+          : { snapgen: [] }),
+      }, 'Quitar') : null)));
+}
+
 function seccionOpenAI(ficha) {
   const vivas = ficha.cuentas_imagen && ficha.cuentas_imagen.length
     ? ficha.cuentas_imagen : null;
@@ -2450,8 +2537,8 @@ function seccionOpenAI(ficha) {
         : pastillaEstado(puesta ? 'ok' : 'vacio',
           puesta ? cuenta.cola : 'sin poner'))),
     h('div', { clase: 'pista' },
-      'La clave con la que se generan las imágenes. Imprescindible, como la de '
-      + 'Cartesia y la cuenta de Claude: sin ella no hay planos que montar.'),
+      'Se usa cuando Imágenes está en OpenAI. Si está en SnapGen, esta clave '
+      + 'no se gasta.'),
     h('div', { clase: 'fila-clave' }, campo,
       h('button', {
         clase: 'mini',
@@ -2494,7 +2581,8 @@ function seccionCartesia(ficha) {
       pastillaEstado(ficha.cartesia.puesta ? 'ok' : 'vacio',
         ficha.cartesia.puesta ? ficha.cartesia.cola : 'sin poner')),
     h('div', { clase: 'pista' },
-      'Una sola, y no se reparte: la locución se sintetiza de una tirada.'),
+      'Se usa cuando Voz está en Cartesia. Una sola, y no se reparte: la '
+      + 'locución se sintetiza de una tirada.'),
     h('div', { clase: 'fila-clave' }, campo,
       h('button', {
         clase: 'mini',
@@ -2695,7 +2783,9 @@ async function probarCuentaCLI(cid) {
    que no cuestan dinero. Es el mismo bloque en Configuración y en la última
    tarjeta de la guía. */
 const NOMBRES_PROVEEDOR = {
-  openai: 'OpenAI — imágenes', cartesia: 'Cartesia — voz', jamendo: 'Jamendo — música',
+  openai: 'OpenAI — imágenes', snapgen: 'SnapGen — imágenes',
+  cartesia: 'Cartesia — voz', genaipro: 'GenAI Pro — voz',
+  jamendo: 'Jamendo — música',
   freesound: 'FreeSound — efectos', claude: 'Claude',
 };
 
@@ -2932,6 +3022,7 @@ async function guardarClaves(cambios) {
     estadoConfig().ficha = await pedir(API.claves(), {
       method: 'PUT', cuerpo: cambios,
     });
+    if (cambios.proveedores && APP.light) APP.light.voces = null;
     repintarClaves();
     toast('claves guardadas');
   } catch (e) {
@@ -3819,13 +3910,19 @@ function seccionTarifaTTS(datos) {
     h('b', {}, puesta ? `Tarifa del TTS: ${actual} $ por carácter. `
       : 'El TTS sale «sin tarifa». '),
     puesta
-      ? 'Cartesia factura por carácter, y en Sonic un crédito es un carácter. Lo que se '
-        + 'anota es el coste marginal (el precio del crédito de más), no el prorrateo de '
-        + 'la cuota mensual: los créditos incluidos ya están pagados, y repartirlos haría '
-        + 'que el mismo vídeo costara distinto según cuánto se hubiera usado antes.'
-      : 'Cartesia factura por carácter a un precio que depende del plan contratado, así que '
-        + 'el medidor cuenta los caracteres reales y deja el importe en blanco antes que '
-        + 'inventarlo. Escribe aquí el número de tu factura y empezará a sumar.',
+      ? (datos.proveedor_voz === 'genaipro'
+        ? 'GenAI Pro se anota por carácter. El número es el de tu factura, no un precio fijo.'
+        : 'Cartesia factura por carácter, y en Sonic un crédito es un carácter. Lo que se '
+          + 'anota es el coste marginal (el precio del crédito de más), no el prorrateo de '
+          + 'la cuota mensual: los créditos incluidos ya están pagados, y repartirlos haría '
+          + 'que el mismo vídeo costara distinto según cuánto se hubiera usado antes.')
+      : (datos.proveedor_voz === 'genaipro'
+        ? 'GenAI Pro factura por carácter y el precio no viene puesto: el medidor cuenta '
+          + 'los caracteres y deja el importe en «sin tarifa». Escribe el de tu factura '
+          + 'y empezará a sumar en genaipro.usd_por_caracter.'
+        : 'Cartesia factura por carácter a un precio que depende del plan contratado, así que '
+          + 'el medidor cuenta los caracteres reales y deja el importe en blanco antes que '
+          + 'inventarlo. Escribe aquí el número de tu factura y empezará a sumar.'),
     h('div', { clase: 'fila', estilo: 'margin-top:8px' },
       h('label', { estilo: 'margin:0' }, '$ por carácter'), entrada,
       h('button', {
@@ -9850,7 +9947,8 @@ function vocesLight(idioma) {
       lista: catalogo.lista || [] };
     pedir(API.voces(idioma, true))
       .then(datos => {
-        APP.light.voces = { idioma, lista: datos.voces || [], pidiendo: null };
+        APP.light.voces = { idioma, lista: datos.voces || [], pidiendo: null,
+          proveedor: datos.proveedor || 'cartesia' };
         if (['preset', 'crear'].includes(APP.light.vista)) pintarLight();
       })
       .catch(() => { APP.light.voces = { idioma, lista: [], pidiendo: null }; });
@@ -9871,9 +9969,13 @@ function selectorVozPropiaLight(e) {
   }
   const propias = lista.filter(v => v.publica === false);
   if (!propias.length) {
+    const proveedor = (APP.light.voces || {}).proveedor;
     caja.appendChild(h('div', { clase: 'pista' },
-      'No hay voces clonadas en esta cuenta de Cartesia: la voz se elige por la '
-      + 'descripción de arriba. Si clonas una, aparecerá aquí.'));
+      proveedor === 'genaipro'
+        ? 'La voz sale de GenAI Pro: se elige en la lista de arriba. Las '
+          + 'emociones de Cartesia no se locutan; la velocidad sí.'
+        : 'No hay voces clonadas en esta cuenta de Cartesia: la voz se elige por la '
+          + 'descripción de arriba. Si clonas una, aparecerá aquí.'));
     return caja;
   }
   if (e.voz_id && !propias.some(v => v.id === e.voz_id)) e.voz_id = '';
