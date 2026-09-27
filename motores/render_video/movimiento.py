@@ -79,6 +79,18 @@ def calcular(plan, dir_escenas, dir_hyper, blockout_dir, escala=2):
 
         de = float(zoom.get("de", 1.0))
         a = float(zoom.get("a", 1.0))
+        # Un paneo tiene DOS centros. Sin `centro_fin` la ventana de llegada
+        # usa el mismo que la de salida, que es el zoom quieto de siempre.
+        fin = zoom.get("centro_fin")
+        centro_fin = list(centro)
+        if isinstance(fin, (list, tuple)) and len(fin) >= 2:
+            try:
+                centro_fin = [float(fin[0]), float(fin[1])]
+            except (TypeError, ValueError):
+                centro_fin = list(centro)
+        curva = str(zoom.get("curva") or "")
+        if curva not in ("lineal", "suave", "entrada", "salida", "cine"):
+            curva = ""
 
         entrada = {
             "id": sid,
@@ -86,13 +98,18 @@ def calcular(plan, dir_escenas, dir_hyper, blockout_dir, escala=2):
             "t_out": escena.get("t_out"),
             "transicion": escena.get("transicion", "corte"),
             "centro": [round(c, 4) for c in centro],
+            "centro_fin": [round(c, 4) for c in centro_fin],
             "origen_centro": fuente,
             "escala_ini": de,
             "escala_fin": a,
             "ventana_ini": ventana(centro, de),
-            "ventana_fin": ventana(centro, a),
+            "ventana_fin": ventana(centro_fin, a),
             "componente": escena.get("componente"),
         }
+        # Sin curva el render sigue con el smoothstep de siempre. No se
+        # escribe la clave para que un plan viejo no cambie de forma.
+        if curva:
+            entrada["curva"] = curva
 
         if os.path.exists(origen):
             destino = os.path.join(dir_hyper, f"{sid}.png")

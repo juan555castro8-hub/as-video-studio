@@ -67,6 +67,11 @@ POR_DEFECTO = {
     # porque es de la instalacion, no de la pantalla: desde el movil no hay
     # que volver a verla.
     "onboarding_visto": False,
+    # LOS SUBTITULOS. A diferencia de la calidad, apagarlos SI se copia a los
+    # proyectos que ya existen (ver guardar_ajustes en app.py): no entran en
+    # la firma de una imagen, y si el ajuste no moviera la de callouts el
+    # video seguiria listo con la linea puesta. Ausente aqui = si.
+    "subtitulos": True,
 }
 
 
@@ -80,6 +85,7 @@ def leer():
     if salida.get("calidad_imagen") not in CALIDADES:
         salida["calidad_imagen"] = POR_DEFECTO["calidad_imagen"]
     salida["onboarding_visto"] = bool(salida.get("onboarding_visto"))
+    salida["subtitulos"] = bool(salida.get("subtitulos", True))
     return salida
 
 
@@ -100,6 +106,8 @@ def guardar(cambios):
                 f"calidad {valor!r}: solo {', '.join(CALIDADES)}")
         if clave == "onboarding_visto" and not isinstance(valor, bool):
             raise ValueError("onboarding_visto es verdadero o falso")
+        if clave == "subtitulos" and not isinstance(valor, bool):
+            raise ValueError("subtitulos es verdadero o falso")
         actual[clave] = valor
     escribir_json(RUTA, actual)
     return actual

@@ -46,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cartelas  # noqa: E402
 import comun  # noqa: E402
 import estadisticas  # noqa: E402
+import montaje  # noqa: E402
 import subtitulos  # noqa: E402
 import medios  # noqa: E402
 import tipografia  # noqa: E402
@@ -307,10 +308,24 @@ def _con_defectos(params):
 # un subtitulo no flota, asi que no hay nada que colocar.
 
 
-def suavizar(u):
-    """La misma curva de aceleracion que usa el reproductor y el render."""
+def suavizar(u, curva=""):
+    """La misma curva de aceleracion que usa el reproductor y el render.
+
+    Sin curva, o con `suave`, es el smoothstep de siempre. Un plan viejo no
+    trae curva y se sigue leyendo igual.
+    """
     u = min(max(float(u), 0.0), 1.0)
-    return u * u * (3 - 2 * u)
+    curva = str(curva or "suave")
+    if curva == "lineal":
+        return u
+    if curva == "entrada":
+        return u * u * u
+    if curva == "salida":
+        v = 1.0 - u
+        return 1.0 - v * v * v
+    if curva == "cine":
+        return u * u * u * (u * (u * 6.0 - 15.0) + 10.0)
+    return u * u * (3.0 - 2.0 * u)
 
 
 def ventana_en(mov, fraccion, tamano=TAMANO, aspecto=16 / 9):
@@ -323,7 +338,7 @@ def ventana_en(mov, fraccion, tamano=TAMANO, aspecto=16 / 9):
     """
     ancho, alto = tamano
     ini, fin = mov["ventana_ini"], mov["ventana_fin"]
-    e = suavizar(fraccion)
+    e = suavizar(fraccion, (mov or {}).get("curva"))
     x = ini[0] + (fin[0] - ini[0]) * e
     y = ini[1] + (fin[1] - ini[1]) * e
     w = ini[2] + (fin[2] - ini[2]) * e
@@ -712,6 +727,10 @@ def capa_fija_de(escena, p, banda=None, salida=SALIDA):
     agujero que la decision del 23 venia a tapar, y se asume a sabiendas.
     """
     if cartelas.es_cartela(escena) or escena.get("capitulo_svg"):
+        return _envoltorio_fijo("", salida), []
+    # Apagados en el ajuste o en el proyecto: la cartela y la camara siguen,
+    # el subtitulo no. La clave ausente es «si», como todos los videos de antes.
+    if not montaje.quiere_subtitulos(p):
         return _envoltorio_fijo("", salida), []
     banda = banda or banda_subtitulo(salida)
     paleta = paleta_de_guia((p.get("estilo") or {}).get("guia"), p.get("paleta"))
@@ -1313,7 +1332,12 @@ def _semilla_de(plan):
 
 # ------------------------------------------------------------------ ejecutar
 
-def ejecutar(proyecto, params, avisar=None, unidades=None):
+#: `sin_modelo` es el re-roll: el ritmo sale de la cache o de las reglas, y
+#: no hay ni una llamada. No es un param: no tiene que mover la firma.
+OPCIONES_EJECUCION = ("sin_modelo",)
+
+
+def ejecutar(proyecto, params, avisar=None, unidades=None, sin_modelo=False):
     """Capa vectorial y movimiento de cada plano. Si unidades no es None, solo esas."""
     arranque_paso = time.time()
     p = _con_defectos(params)
@@ -1386,6 +1410,20 @@ def ejecutar(proyecto, params, avisar=None, unidades=None):
     # renderizado.
     banda = banda_subtitulo(salida)
 
+    # EL MONTAJE SE DECIDE AQUI, que es gratis. La semilla de las imagenes no
+    # se toca: el zoom que escribe p6 en el plan se queda para la firma de la
+    # imagen, y el que se renderiza es el de `montaje.json`. Si la decision
+    # falla, se sigue con el zoom del plan, que es lo que ya se pago.
+    previo_montaje = montaje.abrir_previo(trabajo)
+    plan_montaje = {}
+    try:
+        plan_montaje = montaje.decidir(
+            proyecto, escenas, params, cache_dir=trabajo,
+            sin_modelo=bool(sin_modelo), previo=previo_montaje)
+    except Exception as fallo:                                 # noqa: BLE001
+        avisos.append(f"montaje: {str(fallo)[:160]}")
+        plan_montaje = {}
+
     for indice, escena in enumerate(escenas):
         sid = escena["id"]
         uid = f"escena:{sid}"
@@ -1431,9 +1469,18 @@ def ejecutar(proyecto, params, avisar=None, unidades=None):
 
         # el movimiento va primero: la capa necesita saber que trozo del plano
         # sigue en cuadro durante todo el zoom para no rotular fuera de campo
-        entrada = movimiento.calcular({"escenas": [escena]}, dir_escenas,
+        escena_cam = escena
+        plano_m = (plan_montaje.get("planos") or {}).get(sid) or {}
+        if plano_m.get("zoom"):
+            # Copia: el plan de assets no se reescribe. Su zoom entra en el
+            # prompt de la imagen y moverlo aqui se pagaria.
+            escena_cam = dict(escena)
+            escena_cam["zoom"] = plano_m["zoom"]
+        entrada = movimiento.calcular({"escenas": [escena_cam]}, dir_escenas,
                                       dirs["hyper"], os.path.join(dir_assets, "sets"),
                                       int(p["escala_hyper"]))[0]
+        if plano_m.get("curva"):
+            entrada["curva"] = plano_m["curva"]
         evitar = _zonas_de_unidad(p, uid)
         apagada = _sin_callout(p, uid)
         if cartelas.sobre_imagen(escena):
@@ -1536,6 +1583,18 @@ def ejecutar(proyecto, params, avisar=None, unidades=None):
                     os.path.join(dirs["movimiento"], f"{e['id']}.json"), {})
                     for e in escenas]}
     medios.escribir_json(os.path.join(trabajo, "movimiento.json"), completo)
+    if plan_montaje:
+        medios.escribir_json(os.path.join(trabajo, "montaje.json"), plan_montaje)
+        try:
+            montaje.recordar(
+                getattr(proyecto, "id", ""),
+                temperamento=plan_montaje.get("temperamento"),
+                dominante=plan_montaje.get("dominante"),
+                mezcla=plan_montaje.get("mezcla"),
+                gancho=plan_montaje.get("gancho"),
+                cierre=plan_montaje.get("cierre"))
+        except Exception:                                      # noqa: BLE001
+            pass
 
     # los assets son unidades heredadas del paso anterior: aqui no producen
     # nada propio, pero hay que sellarlas o el paso jamas llegaria a 'listo'
@@ -1558,12 +1617,24 @@ def ejecutar(proyecto, params, avisar=None, unidades=None):
     # devuelve [] antes que fingir una sincronia).
     trozos = sum(len(r.get("elementos") or []) for r in resultados.values())
     con_texto = sum(1 for r in resultados.values() if r.get("elementos"))
+    ficha_montaje = montaje.resumen_publico(plan_montaje)
+    con_sub = montaje.quiere_subtitulos(params)
     salidas = {"movimiento": "movimiento.json", "capas": "capas",
                "capas_fijas": "capas_fijas",
                "hyperframes": "hyper", "previos": "previo",
+               "montaje": "montaje.json" if plan_montaje else "",
                "n_escenas": len(escenas), "avisos": avisos,
+               "semilla_montaje": ficha_montaje.get("semilla"),
+               "temperamento": ficha_montaje.get("temperamento") or "",
+               "dominante": ficha_montaje.get("dominante") or "",
+               "musica_db": ficha_montaje.get("musica_db"),
+               "origen_ritmo": ficha_montaje.get("origen_ritmo") or "",
+               "subtitulos": con_sub,
                "resumen": (f"{len(escenas)} capas, {trozos} trozos de subtítulo "
-                           f"en {con_texto} planos")}
+                           f"en {con_texto} planos"
+                           + (f", montaje {ficha_montaje.get('temperamento_nombre')}"
+                              if ficha_montaje.get("temperamento_nombre") else "")
+                           + ("" if con_sub else ", sin subtítulos"))}
     avisar(1.0, salidas["resumen"])
     # El tiempo REAL de esta tanda, al historico: es lo unico que hace que la
     # barra deje de prometer la tabla del primer dia (ver p6._anotar_tiempo).

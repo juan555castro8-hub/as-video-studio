@@ -500,6 +500,16 @@ def _instruccion(transcript, metadatos, brief, anterior, opciones, correcciones,
         "== BRIEF DEL USUARIO ==",
         brief.get("instrucciones") or "(sin brief)",
     ])
+    # COMO EMPIEZA Y COMO ACABA, si el brief lo eligio. Con guion propio no
+    # se inyecta: el texto es del usuario y el arranque solo trata el montaje.
+    try:
+        import montaje
+        seccion_montaje = montaje.texto_para_guion(
+            brief, propio=bool(opciones.get("guion_propio")))
+    except Exception:                                      # noqa: BLE001
+        seccion_montaje = ""
+    if seccion_montaje:
+        partes.extend(["", seccion_montaje])
 
     # LOS PERSONAJES DEL CANAL, detras del brief: son del canal, como el tono,
     # y no de este video. Lo que se le pide al redactor esta escrito en

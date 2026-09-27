@@ -514,7 +514,7 @@ BANDAS = {"graves": (20.0, 250.0), "medios": (250.0, 4000.0),
           "agudos": (4000.0, 16000.0)}
 
 
-def arco_del_video(escenas, duracion_s=0.0):
+def arco_del_video(escenas, duracion_s=0.0, intensidades=None):
     """En que tramos se parte el video y que animo pide cada uno, POR EL RITMO.
 
     QUE SE MIDE
@@ -578,7 +578,47 @@ def arco_del_video(escenas, duracion_s=0.0):
         tramo["velocidad"] = ("high" if tramo["densidad"] > media * 1.25
                               else "low" if tramo["densidad"] < media * 0.8
                               else "medium")
+    # La intensidad del guion solo entra si alguien la pasa. Sin ella el arco
+    # es el de la densidad, que es el que ya tenian los videos montados.
+    if intensidades:
+        _empujar_por_intensidad(tramos, escenas, intensidades, origen)
     return tramos
+
+
+def _empujar_por_intensidad(tramos, escenas, intensidades, origen):
+    """Sube o baja el animo de un tramo segun lo que pesa el guion ahi."""
+    por_id = {}
+    for sid, valor in (intensidades or {}).items():
+        try:
+            por_id[str(sid)] = int(valor)
+        except (TypeError, ValueError):
+            continue
+    if not por_id:
+        return
+    cuantos = len(tramos)
+    for tramo in tramos:
+        desde, hasta = tramo["desde"], tramo["hasta"]
+        vals = []
+        for escena in escenas:
+            t = float(escena.get("t_in") or 0.0) - origen
+            sid = str(escena.get("id") or "")
+            if desde <= t < hasta and sid in por_id:
+                vals.append(por_id[sid])
+        if not vals:
+            continue
+        media = sum(vals) / len(vals)
+        if media >= 4:
+            tramo["velocidad"] = "high" if media >= 4.4 or tramo["velocidad"] == "high" else "medium"
+            if tramo["animo"] == "sobrio":
+                tramo["animo"] = "tension"
+            tramo["por_que"] = tramo["por_que"] + "; el guion empuja"
+        elif media <= 2.2:
+            tramo["velocidad"] = "low"
+            if tramo["i"] == cuantos - 1:
+                tramo["animo"] = "melancolico"
+            elif tramo["i"] != 0 and tramo["animo"] == "tension":
+                tramo["animo"] = "sobrio"
+            tramo["por_que"] = tramo["por_que"] + "; el guion afloja"
 
 
 def medir(ruta):

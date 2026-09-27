@@ -386,6 +386,8 @@ const API = {
   ajustesCLI: () => `${BASE}/api/ajustes-cli`,
   claves: () => `${BASE}/api/claves`,
   ajustes: () => `${BASE}/api/ajustes`,
+  montaje: pid => `${BASE}/api/proyectos/${encodeURIComponent(pid)}/montaje`,
+  sortearMontaje: pid => `${BASE}/api/proyectos/${encodeURIComponent(pid)}/montaje/sortear`,
   cuentasCLI: refrescar => `${BASE}/api/claves/cli${refrescar ? '?refrescar=1' : ''}`,
   entrarCLI: cid => `${BASE}/api/claves/cli/${encodeURIComponent(cid)}/entrar`,
   codigoCLI: cid => `${BASE}/api/claves/cli/${encodeURIComponent(cid)}/codigo`,
@@ -2278,6 +2280,7 @@ function pintarConfig() {
   caja.appendChild(bloquePruebaClaves());
   caja.appendChild(seccionOpenAI(ficha));
   caja.appendChild(seccionCalidadImagen());
+  caja.appendChild(seccionSubtitulos());
   caja.appendChild(seccionCartesia(ficha));
   caja.appendChild(seccionCLI());
   caja.appendChild(seccionOtrasClaves(ficha));
@@ -2379,6 +2382,47 @@ function seccionCalidadImagen() {
     'Es el punto de partida de los videos NUEVOS. Los que ya existen se quedan '
     + 'con la suya: se cambia por vídeo desde su propia ficha.'));
   return caja;
+}
+
+
+/* LOS SUBTITULOS, EN TODO EL CANAL. A diferencia de la calidad, apagarlos
+ * si alcanza a los videos ya hechos: no cuesta una imagen, y el siguiente
+ * montaje sale sin la linea. Las cartelas y el movimiento de camara siguen. */
+function seccionSubtitulos() {
+  const datos = estadoConfig().ajustes;
+  const puestos = !datos || datos.ajustes.subtitulos !== false;
+  const caja = h('section', { clase: 'bloque-config' },
+    h('h3', {}, 'Subtítulos'),
+    h('div', { clase: 'pista' },
+      'Van quemados en el vídeo. Apagarlos no toca las imágenes ni la voz: '
+      + 'al volver a montar quedan las cartelas y el movimiento de cámara, '
+      + 'sin la línea de abajo.'));
+  if (!datos) {
+    caja.appendChild(h('div', { clase: 'cargando' }, 'leyendo el ajuste…'));
+    return caja;
+  }
+  caja.appendChild(h('label', { clase: 'mando' },
+    h('input', {
+      type: 'checkbox',
+      checked: puestos,
+      onchange: ev => guardarSubtitulos(!!ev.target.checked),
+    }),
+    'Mostrar subtítulos'));
+  return caja;
+}
+
+
+async function guardarSubtitulos(valor) {
+  const vista = estadoConfig();
+  try {
+    const r = await pedir(API.ajustes(),
+                          { method: 'PUT', cuerpo: { subtitulos: !!valor } });
+    vista.ajustes = { ...(vista.ajustes || {}), ajustes: r.ajustes, costes: r.costes };
+  } catch (e) {
+    vista.error = e.message;
+    toast(e.message, true);
+  }
+  repintarClaves();
 }
 
 
@@ -5634,6 +5678,10 @@ async function cargarVideoLight(pid) {
     // el coste es de ESTE vídeo: arrastrar el del anterior seria enseñar la
     // cifra de otro proyecto mientras llega la buena
     v.coste = null;
+    v.montaje = null;
+    try {
+      v.montaje = await pedir(API.montaje(pid));
+    } catch (e) { v.montaje = null; }
     // y las escenas del previsualizador, por lo mismo: son las de otro vídeo
     pararPrevia();
     PREVIA.ficha = null;
@@ -5681,7 +5729,8 @@ async function contarLaTandaQueMurio(pid) {
     const datos = await pedir(
       `${API.trabajosVivos()}?proyecto=${encodeURIComponent(pid)}`);
     const generaciones = (datos.trabajos || [])
-      .filter(t => String(t.nombre || '').startsWith('generar:'));
+      .filter(t => String(t.nombre || '').startsWith('generar:')
+                || String(t.nombre || '') === 'remontar');
     const ultimo = generaciones[generaciones.length - 1];
     if (!ultimo || ultimo.estado !== 'error') return;
     mostrarError(CLAVE_VIDEO_LIGHT, new Error(
@@ -5701,7 +5750,8 @@ async function reengancharTandaLight(pid) {
     const datos = await pedir(`${API.trabajosVivos()}?proyecto=`
       + `${encodeURIComponent(pid)}&activos=1`);
     const vivo = (datos.trabajos || []).find(
-      t => String(t.nombre || '').startsWith('generar:'));
+      t => String(t.nombre || '').startsWith('generar:')
+        || String(t.nombre || '') === 'remontar');
     if (!vivo) { await contarLaTandaQueMurio(pid); return; }
     /* DE QUE TANDA ES EL TRABAJO QUE YA VENIA CORRIENDO.
      *
@@ -5718,7 +5768,7 @@ async function reengancharTandaLight(pid) {
      * El orden importa: 'render' se mira ANTES que 'video' porque su nombre
      * lleva las dos pestañas dentro. */
     const nombre = String(vivo.nombre);
-    const tanda = nombre.includes('render') ? 'render'
+    const tanda = (nombre === 'remontar' || nombre.includes('render')) ? 'render'
       : (nombre.includes('video') ? 'video'
         : (nombre.includes('voz') ? 'voz' : 'guion'));
     // la tanda de las imágenes acaba en el previsualizador; la del MP4, en el vídeo
@@ -8150,6 +8200,85 @@ document.addEventListener('keydown', ev => {
 });
 
 
+/* EL MONTAJE, aparte de las imagenes. El temperamento se guarda al cambiarlo
+   (no al pintar: pintar no escribe params) y «Volver a montar» sortea otra
+   semilla y rehace solo lo gratis. */
+function mandosMontaje() {
+  const v = videoAbierto();
+  const m = v.montaje || {};
+  const puesto = m.temperamento || '';
+  const lista = m.temperamentos || [];
+  const plan = m.plan || {};
+  const caja = h('div', { clase: 'montaje-mandos' },
+    h('label', { clase: 'mando' },
+      'Montaje',
+      h('select', {
+        value: puesto,
+        onchange: ev => guardarTemperamentoLight(ev.target.value),
+      },
+        h('option', { value: '' }, 'Sorteado'),
+        lista.map(t => h('option', { value: t.id }, t.nombre)))),
+    conAyuda(
+      'Sortea otro montaje de este mismo guion: otra camara, otras '
+      + 'transiciones, otro ritmo. No regenera imagenes ni voz, y no vuelve '
+      + 'a llamar al modelo.',
+      h('button', {
+        clase: 'mini',
+        disabled: !!trabajoVideoLight(),
+        onclick: () => sortearMontajeLight(),
+      }, 'Volver a montar')));
+  const nombre = plan.temperamento_nombre || '';
+  if (nombre) caja.appendChild(h('span', { clase: 'meta' }, nombre));
+  if (m.gancho) caja.appendChild(h('span', { clase: 'meta' }, `Arranque: ${m.gancho}`));
+  if (m.cierre) caja.appendChild(h('span', { clase: 'meta' }, `Cierre: ${m.cierre}`));
+  if (m.subtitulos === false) {
+    caja.appendChild(h('span', { clase: 'meta' }, 'Sin subtítulos'));
+  }
+  return caja;
+}
+
+
+async function guardarTemperamentoLight(valor) {
+  const v = videoAbierto();
+  if (!v.pid) return;
+  const puesto = (v.montaje || {}).temperamento || '';
+  if (valor === puesto) return;
+  try {
+    await pedir(API.params(v.pid, 'callouts'), {
+      method: 'PUT', cuerpo: { params: { temperamento: valor } },
+    });
+    v.montaje = v.montaje || {};
+    v.montaje.temperamento = valor;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+
+async function sortearMontajeLight() {
+  const v = videoAbierto();
+  if (!v.pid) return;
+  limpiarError(CLAVE_VIDEO_LIGHT);
+  v.vista = 'video';
+  try {
+    const datos = await pedir(API.sortearMontaje(v.pid), { method: 'POST', cuerpo: {} });
+    const tid = datos.trabajo_id || (datos.trabajo || {}).id;
+    if (!tid) throw new Error('el servidor no ha devuelto ningún trabajo');
+    seguirTrabajo(CLAVE_VIDEO_LIGHT, tid, async trabajo => {
+      if (trabajo.estado === 'listo') {
+        await cargarVideoLight(v.pid);
+        v.vista = 'video';
+      }
+      pintarLight();
+    });
+    pintarLight();
+  } catch (err) {
+    mostrarError(CLAVE_VIDEO_LIGHT, err);
+    pintarLight();
+  }
+}
+
+
 function vistaVideoLight() {
   const v = videoAbierto();
   const caja = h('div', { clase: 'light-video' });
@@ -8163,6 +8292,7 @@ function vistaVideoLight() {
     h('h2', {}, v.nombre || 'El vídeo'),
     h('span', { clase: 'crece' }),
     costeLight()));
+  caja.appendChild(mandosMontaje());
 
   const error = ERRORES[CLAVE_VIDEO_LIGHT];
   if (error) caja.appendChild(cajaError(error));
