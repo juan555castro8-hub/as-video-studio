@@ -717,8 +717,8 @@ def dibujar_desde_guia(estilo, destino, ejes=None, calidad="medium",
             encabezado="Produce one single full-frame image for a style "
                        "reference sheet.")
         # SIN referencias: texto solo. OpenAI va a /images/generations y
-        # SnapGen acepta el plano sin image_urls. Una lamina vacia era lo que
-        # provocaba el "Unsupported content type".
+        # SnapGen acepta el plano sin el campo files. Una lamina vacia era lo
+        # que provocaba el "Unsupported content type".
         png, meta = imagen.generar(prompt, [], quality=calidad,
                                    tamano="apaisado")
         ruta = os.path.join(destino, f"{eje}.png")

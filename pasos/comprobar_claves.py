@@ -8,7 +8,7 @@ descubren a mitad de una tanda de imagenes, que es la forma cara.
 Aqui cada proveedor tiene su prueba, elegida para que NO cueste dinero:
 
     openai     GET /v1/models              autentica; no genera nada
-    snapgen    GET /v1/models              autentica; no genera nada
+    snapgen    GET /uapi/v1/account        autentica y lee creditos; no genera
     cartesia   GET /voices                 lista voces; no sintetiza nada
     genaipro   GET /labs/voices?page_size=1   lista una voz; no sintetiza
     jamendo    GET /tracks/?limit=1        una busqueda; el plan es gratuito
@@ -121,26 +121,56 @@ def probar_openai(clave):
                                    f"{_texto_corto(respuesta)}")
 
 
+def _codigo_snapgen(respuesta):
+    try:
+        cuerpo = respuesta.json()
+    except ValueError:
+        return ""
+    detalle = cuerpo.get("detail") if isinstance(cuerpo, dict) else None
+    if isinstance(detalle, dict):
+        return str(detalle.get("error_code") or "")
+    return ""
+
+
 def probar_snapgen(clave):
-    """GET /v1/models. No genera ninguna imagen."""
+    """GET /uapi/v1/account. No genera ninguna imagen y devuelve el saldo."""
     if not clave:
         return _ficha("snapgen", "sin_clave", "no hay clave de SnapGen puesta")
+    base = (os.environ.get("SNAPGEN_API_BASE") or "https://api.snapgen.ai").rstrip("/")
     respuesta, fallo = _pedir(
-        "GET", "https://api.snapgen.org/v1/models",
-        headers={"Authorization": f"Bearer {clave}"})
+        "GET", f"{base}/uapi/v1/account",
+        headers={"x-api-key": clave, "Accept": "application/json"})
     if respuesta is None:
         return _ficha("snapgen", "sin_red",
                       f"no se ha podido hablar con SnapGen: {fallo}")
+    codigo = _codigo_snapgen(respuesta)
     if respuesta.status_code == 200:
-        return _ficha("snapgen", "ok",
-                      "la clave autentica. El saldo se mira en snapgen.org: "
-                      "esta llamada no genera nada y no lo dice")
-    if respuesta.status_code == 401:
-        return _ficha("snapgen", "mal", "SnapGen no reconoce la clave (401)")
-    if respuesta.status_code == 402:
-        return _ficha("snapgen", "mal", "SnapGen dice que no hay saldo (402)")
+        credito = None
+        try:
+            bolsa = (respuesta.json().get("user_credit") or {})
+            credito = bolsa.get("available_credit")
+        except ValueError:
+            credito = None
+        texto = "la clave autentica. Esta llamada no genera nada"
+        if credito is not None:
+            texto += f". Creditos disponibles: {credito}"
+        else:
+            texto += ". El saldo se mira en snapgen.ai/profile/credits"
+        return _ficha("snapgen", "ok", texto)
+    if codigo in ("API_KEY_NOT_FOUND", "API_KEY_REQUIRED", "USER_NOT_FOUND") \
+            or respuesta.status_code in (401, 403):
+        return _ficha("snapgen", "mal",
+                      "SnapGen no reconoce la clave "
+                      f"({codigo or respuesta.status_code})")
+    if codigo in ("NOT_ENOUGH_CREDIT", "NOT_ENOUGH_AND_LOCK_CREDIT") \
+            or respuesta.status_code == 402:
+        return _ficha("snapgen", "mal",
+                      "SnapGen dice que no hay creditos "
+                      f"({codigo or respuesta.status_code})")
     return _ficha("snapgen", "mal",
-                  f"SnapGen contesta {respuesta.status_code}: {_texto_corto(respuesta)}")
+                  f"SnapGen contesta {respuesta.status_code}"
+                  + (f" {codigo}" if codigo else "")
+                  + f": {_texto_corto(respuesta)}")
 
 
 def probar_cartesia(clave):

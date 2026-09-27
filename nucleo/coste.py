@@ -159,10 +159,29 @@ def tarifa_caracter(proveedor="cartesia"):
     return _numero((tarifas().get("tts") or {}).get("usd_por_caracter"))
 
 
-def tarifa_snapgen(resolucion):
-    """USD por imagen entregada de SnapGen en ese escalon, o None."""
-    tabla = (tarifas().get("snapgen") or {}).get("usd_por_imagen") or {}
-    return _numero(tabla.get(str(resolucion or "1K")))
+def creditos_snapgen(modelo=None):
+    """Creditos por imagen publicados para ese modelo, o None.
+
+    gpt-image-2-lower es un precio fijo (2 en las docs de snapgen.ai). Los
+    demas modelos no publican la tabla: None, no un numero inventado.
+    """
+    bloque = tarifas().get("snapgen") or {}
+    nombre = str(modelo or bloque.get("modelo") or "gpt-image-2-lower")
+    tabla = bloque.get("creditos_por_imagen")
+    if isinstance(tabla, dict):
+        return _numero(tabla.get(nombre))
+    if nombre == "gpt-image-2-lower":
+        return _numero(tabla)
+    return None
+
+
+def tarifa_snapgen(modelo=None):
+    """USD por imagen, o None si el dolar por credito no esta publicado."""
+    creditos = creditos_snapgen(modelo)
+    usd = _numero((tarifas().get("snapgen") or {}).get("usd_por_credito"))
+    if creditos is None or usd is None:
+        return None
+    return round(creditos * usd, 6)
 
 
 def coste_openai(usage, tamano, calidad, imagenes=1):
@@ -640,16 +659,32 @@ def reportar_openai(usage, calidad, tamano, imagenes=1, operacion="imagen",
                    usd_estimado=True, detalle=ficha)
 
 
-def reportar_snapgen(resolucion, imagenes=1, operacion="imagen", unidad=None,
-                     detalle=None):
-    """Una imagen de SnapGen, a su tarifa por escalon y no a la de tokens."""
-    precio = tarifa_snapgen(resolucion)
-    ficha = {"resolucion": resolucion, "proveedor": "snapgen", "via": "imagen"}
-    ficha.update(detalle or {})
+def reportar_snapgen(resolucion=None, imagenes=1, operacion="imagen", unidad=None,
+                     detalle=None, modelo=None, creditos=None):
+    """Una imagen de snapgen.ai. El dolar solo sale si hay usd_por_credito.
+
+    Sin ese campo el evento queda sin_tarifa y se guardan los creditos en el
+    detalle: el medidor no convierte 2 creditos en un dolar inventado.
+    """
+    detalle = dict(detalle or {})
+    modelo = modelo or detalle.get("modelo")
+    if creditos is None:
+        creditos = creditos_snapgen(modelo)
+    else:
+        creditos = _numero(creditos)
+    usd_credito = _numero((tarifas().get("snapgen") or {}).get("usd_por_credito"))
+    if creditos is not None and usd_credito is not None:
+        importe = round(float(creditos) * int(imagenes or 1) * usd_credito, 6)
+    else:
+        importe = None
+    ficha = {"resolucion": resolucion, "proveedor": "snapgen", "via": "creditos",
+             "modelo": modelo, "creditos": creditos}
+    ficha.update(detalle)
+    ficha["creditos"] = creditos
+    ficha["modelo"] = modelo
     return _anotar("snapgen", operacion, unidad=unidad,
                    cantidad={"imagenes": int(imagenes or 1)},
-                   usd=None if precio is None else precio * int(imagenes or 1),
-                   usd_estimado=True, detalle=ficha)
+                   usd=importe, usd_estimado=True, detalle=ficha)
 
 
 def reportar_tts(caracteres, operacion="sintesis", unidad=None, tokens=None,
@@ -806,9 +841,12 @@ def _medir_imagen(original):
         tamano = meta.get("tamano") or kwargs.get("tamano") or "apaisado"
         if meta.get("proveedor") == "snapgen":
             registro = reportar_snapgen(
-                meta.get("resolucion") or "1K",
+                meta.get("resolucion"),
                 detalle={"modelo": meta.get("modelo"), "refs": meta.get("refs"),
-                         "segundos": meta.get("segundos"), "tamano": tamano})
+                         "segundos": meta.get("segundos"), "tamano": tamano,
+                         "uuid": meta.get("uuid")},
+                modelo=meta.get("modelo"),
+                creditos=meta.get("creditos"))
         else:
             registro = reportar_openai(meta.get("usage"), calidad, tamano,
                                        detalle={"modelo": meta.get("modelo"),

@@ -154,25 +154,29 @@ def tabla_de_costes(tamano=TAMANO):
     return filas
 
 
-#: SnapGen no tiene el campo quality de OpenAI. La calidad del estudio se
-#: traduce al escalon que cobra: baja y media a 1K, alta a 2K.
-RESOLUCION_SNAPGEN = {"low": "1K", "medium": "1K", "high": "2K"}
-
-
 def tabla_snapgen():
-    """Lo que cobra SnapGen por imagen entregada. Las referencias no se suman."""
+    """Lo que cobra snapgen.ai por imagen. El modelo por defecto no tiene escalones.
+
+    gpt-image-2-lower sale a 2 creditos y 720p, igual en baja, media y alta.
+    El dolar por credito no esta publicado: sin_tarifa, no un precio en dolares.
+    """
+    bloque = COSTE.tarifas().get("snapgen") or {}
+    modelo = str(bloque.get("modelo") or "gpt-image-2-lower")
+    creditos = COSTE.creditos_snapgen(modelo)
+    usd = COSTE.tarifa_snapgen(modelo)
+    resolucion = "720p" if modelo == "gpt-image-2-lower" else None
     filas = []
     for calidad in CALIDADES:
-        resolucion = RESOLUCION_SNAPGEN[calidad]
-        usd = COSTE.tarifa_snapgen(resolucion)
-        numero = 0.0 if usd is None else float(usd)
+        numero = None if usd is None else float(usd)
         filas.append({
             "calidad": calidad,
+            "modelo": modelo,
+            "creditos": creditos,
             "resolucion": resolucion,
-            "usd_imagen": round(numero, 4),
+            "usd_imagen": 0.0 if numero is None else round(numero, 4),
             "usd_referencias": 0.0,
-            "usd_total": round(numero, 4),
-            "sin_tarifa": usd is None,
+            "usd_total": 0.0 if numero is None else round(numero, 4),
+            "sin_tarifa": numero is None,
         })
     base = filas[0]["usd_total"]
     for fila in filas:

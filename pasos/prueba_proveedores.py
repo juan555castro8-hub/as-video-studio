@@ -94,15 +94,22 @@ def prueba_proveedor():
     igual(claves.proveedor_voz(), "genaipro", "en la voz igual")
     os.environ.pop("ESTUDIO_PROVEEDOR_IMAGEN")
     os.environ.pop("ESTUDIO_PROVEEDOR_VOZ")
-    igual(coste.tarifa_snapgen("2K"), 0.014, "SnapGen 2K a 0,014")
-    igual(coste.tarifa_snapgen("1K"), 0.0085, "y 1K a 0,0085")
+    igual(coste.creditos_snapgen("gpt-image-2-lower"), 2,
+          "gpt-image-2-lower son 2 creditos")
+    comprobar(coste.tarifa_snapgen("gpt-image-2-lower") is None,
+              "el dolar por credito no esta publicado")
+    comprobar(coste.creditos_snapgen("gpt-image-2") is None,
+              "gpt-image-2 no publica tabla: no se inventa")
     comprobar(coste.tarifa_caracter("genaipro") is None,
               "GenAI Pro no tiene precio por caracter: sale sin tarifa")
     tabla = {f["calidad"]: f for f in ajustes.tabla_snapgen()}
-    igual(tabla["low"]["resolucion"], "1K", "baja de SnapGen es 1K")
-    igual(tabla["medium"]["usd_total"], 0.0085, "media tambien, al mismo precio")
-    igual(tabla["high"]["resolucion"], "2K", "alta es 2K")
-    igual(tabla["high"]["usd_total"], 0.014, "y sale a 0,014")
+    igual(tabla["low"]["modelo"], "gpt-image-2-lower", "el modelo por defecto es el lower")
+    igual(tabla["low"]["creditos"], 2, "baja son 2 creditos")
+    igual(tabla["medium"]["creditos"], 2, "media tambien, el modelo no tiene escalones")
+    igual(tabla["high"]["creditos"], 2, "alta igual")
+    igual(tabla["high"]["resolucion"], "720p", "la salida documentada es 720p")
+    comprobar(tabla["low"]["sin_tarifa"] and tabla["high"]["sin_tarifa"],
+              "sin dolar publicado, las tres salen sin tarifa")
     motor = medios.motor_imagen()
     comprobar(motor.__file__.replace("\\", "/").endswith("imagen_openai/imagen.py"),
               "con openai elegido, el motor es el de siempre")
@@ -121,58 +128,85 @@ def prueba_empaquetar():
         ruta = os.path.join(_TMP, f"ref{i:02d}.png")
         Image.new("RGB", (1400, 900), (i * 10 % 255, 40, 80)).save(ruta, "PNG")
         rutas.append(ruta)
-    recortadas = imagen._recortar(rutas, 16)
-    igual(len(recortadas), 16, "mas de 16 se quedan en 16")
+    recortadas = imagen._recortar(rutas, imagen.TOPE_REFS)
+    igual(len(recortadas), 10, "mas de 10 se quedan en 10")
     igual(recortadas[-1], rutas[-1], "la continuidad mas reciente se queda")
     comprobar(rutas[-2] not in recortadas, "la continuidad vieja es la primera que sale")
-    imagen.TOPE_CUERPO = 30_000
-    try:
-        usadas, urls, huellas = imagen.empaquetar(rutas[:4])
-    finally:
-        imagen.TOPE_CUERPO = 9 * 1024 * 1024
-    comprobar(all(u.startswith("data:image/jpeg;base64,") for u in urls),
-              "las referencias van como data URL JPEG")
-    comprobar(sum(len(u) for u in urls) < 30_000, "y el cuerpo cabe en el tope")
-    igual(len(usadas), len(urls), "el orden se conserva")
-    vacias, urls0, _ = imagen.empaquetar([])
+    usadas, partes = imagen.empaquetar(rutas[:4])
+    comprobar(all(p[0] == "files" and p[1][2] == "image/png" for p in partes),
+              "las referencias van como ficheros multipart png")
+    igual(len(usadas), len(partes), "el orden se conserva")
+    vacias, partes0 = imagen.empaquetar([])
     igual(vacias, [], "sin referencias no se inventa ninguna")
+    igual(partes0, [], "y no se manda ningun fichero")
+
+
+def _campo(files, clave):
+    for nombre, valor in files or []:
+        if nombre == clave and isinstance(valor, tuple):
+            return valor[1]
+    return None
 
 
 def prueba_snapgen_red():
     print("snapgen")
     imagen = medios.motor("imagen_snapgen/imagen.py")
-    imagen._gasto.update(usd=0.0, llamadas=0)
+    imagen._gasto.update(usd=0.0, llamadas=0, creditos=0)
     imagen._CUENTAS[:] = [imagen._Cuenta("prueba", "clave-snap-prueba")]
     imagen._SELLO[0] = imagen._sello_claves()
     llamadas = []
     estado = {"veces": 0}
+    os.environ.pop("SNAPGEN_MODELO", None)
+    os.environ.pop("SNAPGEN_API_BASE", None)
+    os.environ.pop("SNAPGEN_RESOLUTION", None)
+    os.environ.pop("SNAPGEN_MODE", None)
 
     def post(url, **kw):
-        llamadas.append(("POST", url, kw.get("headers") or {}))
-        cuerpo = kw.get("json") or {}
-        if cuerpo.get("prompt") == "sin-saldo":
-            return Respuesta(402, {"error": {"code": "insufficient_funds",
-                                             "message": "Wallet balance is insufficient"}})
-        if cuerpo.get("prompt") == "clave-mala":
-            return Respuesta(401, {"error": {"code": "invalid_api_key", "message": "bad"}})
-        if cuerpo.get("prompt") == "url-mala":
-            return Respuesta(400, {"error": {"code": "invalid_image_urls",
-                                             "message": "invalid image url"}})
-        if cuerpo.get("prompt") == "demasiado":
-            return Respuesta(429, {}, {"retry-after": "1"})
-        return Respuesta(202, {"id": "task_prueba", "status": "queued"},
-                         {"x-gateway-task-id": "task_prueba"})
+        cabeceras = kw.get("headers") or {}
+        files = kw.get("files") or []
+        llamadas.append(("POST", url, cabeceras, files))
+        prompt = _campo(files, "prompt")
+        if prompt == "sin-saldo":
+            return Respuesta(402, {"detail": {
+                "error_code": "NOT_ENOUGH_CREDIT",
+                "error_message": "Not enough credits"}})
+        if prompt == "premium":
+            return Respuesta(402, {"detail": {
+                "error_code": "GPT_IMAGE_2_LOWER_PREMIUM_PLAN_REQUIRED",
+                "message": "Premium plan is required"}})
+        if prompt == "clave-mala":
+            return Respuesta(404, {"detail": {
+                "error_code": "API_KEY_NOT_FOUND",
+                "error_message": "Api key is not found"}})
+        if prompt == "demasiadas":
+            return Respuesta(400, {"detail": {
+                "error_code": "TOO_MANY_IMAGES",
+                "error_message": "too many"}})
+        if prompt == "limite":
+            return Respuesta(429, {"detail": {"error_code": "RATE_LIMIT_ERROR",
+                                             "message": "slow down"}},
+                             {"retry-after": "1"})
+        return Respuesta(200, {
+            "uuid": "hist-prueba", "status": 1, "status_desc": "Processing",
+            "model_name": "gpt-image-2-lower", "estimated_credit": 2,
+            "generate_result": None,
+        })
 
     def get(url, **kw):
-        llamadas.append(("GET", url))
-        if url.endswith("/tasks/task_prueba"):
+        llamadas.append(("GET", url, kw.get("headers") or {}))
+        if "/uapi/v1/history/" in url:
             estado["veces"] += 1
             if estado["veces"] < 2:
-                return Respuesta(200, {"id": "task_prueba", "status": "processing",
-                                       "progress": 30})
-            return Respuesta(200, {"id": "task_prueba", "status": "succeeded",
-                                   "result": {"urls": ["https://cdn.ejemplo/img.png"]},
-                                   "charged_microusd": "8500"})
+                return Respuesta(200, {"uuid": "hist-prueba", "status": 1,
+                                       "status_percentage": 30})
+            return Respuesta(200, {
+                "uuid": "hist-prueba", "status": 2, "status_desc": "COMPLETED",
+                "used_credit": 2,
+                "generated_image": [{
+                    "image_url": "https://cdn.ejemplo/img.png",
+                    "aspect_ratio": "16:9",
+                }],
+            })
         return Respuesta(200, None, contenido=png_de())
 
     original = (imagen.requests.post, imagen.requests.get, imagen.time.sleep, imagen.POLL_S)
@@ -183,39 +217,70 @@ def prueba_snapgen_red():
     imagen.POLL_S = 0
     try:
         png, meta = imagen.generar("un farol", [], quality="medium", tamano="apaisado")
-        comprobar(png[:8] == b"\x89PNG\r\n\x1a\n", "el 202 se sondea y vuelve un PNG")
+        comprobar(png[:8] == b"\x89PNG\r\n\x1a\n", "el status 1 se sondea y vuelve un PNG")
         igual(meta["proveedor"], "snapgen", "la meta dice snapgen")
+        igual(meta["modelo"], "gpt-image-2-lower", "el modelo por defecto es el lower")
         igual(meta["tamano"], "16:9", "el apaisado sale 16:9")
-        igual(meta["resolucion"], "1K", "medium es 1K")
-        igual(meta["coste"], 0.0085, "y se cobra la tarifa de SnapGen, no tokens")
-        cabecera = llamadas[0][2]
-        comprobar(cabecera.get("Prefer") == "respond-async", "pide respond-async")
-        comprobar(len(cabecera.get("Idempotency-Key") or "") == 40, "la clave es un sha1")
+        igual(meta["resolucion"], "720p", "la salida fija es 720p")
+        igual(meta["creditos"], 2, "se anotan 2 creditos, no un dolar inventado")
+        comprobar(meta["coste"] is None, "sin usd_por_credito el coste en dolares es None")
+        url, cabecera, files = llamadas[0][1], llamadas[0][2], llamadas[0][3]
+        comprobar(url == "https://api.snapgen.ai/uapi/v1/imagen/gpt-image-2-lower",
+                  "el alta va a api.snapgen.ai, al endpoint del lower")
+        comprobar(cabecera.get("x-api-key") == "clave-snap-prueba", "autentica con x-api-key")
+        comprobar("Authorization" not in cabecera and "Prefer" not in cabecera
+                  and "Idempotency-Key" not in cabecera,
+                  "no manda Bearer, ni Prefer, ni idempotencia")
+        comprobar(_campo(files, "resolution") is None and _campo(files, "mode") is None,
+                  "el lower no recibe mode ni resolution")
+        igual(_campo(files, "aspect_ratio"), "16:9", "el aspect_ratio viaja en el formulario")
+        comprobar(not any(nombre == "files" for nombre, _v in files),
+                  "sin referencias no se adjunta ningun fichero")
         png_h, meta_h = imagen.generar("detalle", [], quality="high", tamano="vertical")
-        igual(meta_h["resolucion"], "2K", "high es 2K")
+        igual(meta_h["resolucion"], "720p", "high no cambia la resolucion del lower")
         igual(meta_h["tamano"], "9:16", "vertical es 9:16")
         comprobar(png_h[:4] == b"\x89PNG", "y tambien es PNG")
+        alta_h = [x for x in llamadas if x[0] == "POST"][-1]
+        igual(_campo(alta_h[3], "aspect_ratio"), "9:16", "el vertical viaja como aspect_ratio")
         imagen._CUENTAS[:] = [imagen._Cuenta("prueba", "clave-snap-prueba")]
         try:
             imagen.generar("sin-saldo", [])
-            comprobar(False, "402 tiene que ser SinSaldo")
+            comprobar(False, "NOT_ENOUGH_CREDIT tiene que ser SinSaldo")
         except imagen.SinSaldo:
-            comprobar(True, "402 es SinSaldo")
+            comprobar(True, "NOT_ENOUGH_CREDIT es SinSaldo")
+        imagen._CUENTAS[:] = [imagen._Cuenta("prueba", "clave-snap-prueba")]
+        try:
+            imagen.generar("premium", [])
+            comprobar(False, "el plan Premium tiene que fallar")
+        except imagen.SinSaldo:
+            comprobar(False, "pedir Premium no es quedarse sin creditos")
+        except RuntimeError as fallo:
+            comprobar("Premium" in str(fallo), "y dice que hace falta el plan Premium")
         imagen._CUENTAS[:] = [imagen._Cuenta("prueba", "clave-snap-prueba")]
         try:
             imagen.generar("clave-mala", [])
-            comprobar(False, "401 tiene que rechazar la clave")
+            comprobar(False, "API_KEY_NOT_FOUND tiene que rechazar la clave")
         except RuntimeError as fallo:
-            comprobar("401" in str(fallo), "401 dice que la clave no vale")
+            comprobar("clave" in str(fallo).lower(), "404 API_KEY_NOT_FOUND dice que la clave no vale")
         imagen._CUENTAS[:] = [imagen._Cuenta("prueba", "clave-snap-prueba")]
         antes = len(llamadas)
         try:
-            imagen.generar("url-mala", [])
-            comprobar(False, "la url invalida tiene que fallar")
+            imagen.generar("demasiadas", [])
+            comprobar(False, "TOO_MANY_IMAGES tiene que fallar")
         except RuntimeError as fallo:
-            comprobar("URLs publicas" in str(fallo), "y dice que hacen falta URLs publicas")
+            comprobar("TOO_MANY_IMAGES" in str(fallo), "y nombra el codigo")
         igual(len([x for x in llamadas[antes:] if x[0] == "POST"]), 1,
               "un 400 no se reintenta")
+        from PIL import Image as _Imagen
+        ref = os.path.join(_TMP, "ref-snap.png")
+        _Imagen.new("RGB", (8, 8), (1, 2, 3)).save(ref, "PNG")
+        imagen._CUENTAS[:] = [imagen._Cuenta("prueba", "clave-snap-prueba")]
+        antes = len(llamadas)
+        imagen.generar("con-ref", [ref], tamano="apaisado")
+        alta = [x for x in llamadas[antes:] if x[0] == "POST"][0]
+        ficheros = [p for p in alta[3] if p[0] == "files"]
+        igual(len(ficheros), 1, "la referencia viaja en el campo files")
+        comprobar(ficheros[0][1][2] == "image/png", "y el mime es png")
     finally:
         imagen.requests.post, imagen.requests.get, imagen.time.sleep, imagen.POLL_S = original
         imagen._CUENTAS[:] = []
@@ -386,9 +451,14 @@ def prueba_comprobar():
     vistas = []
 
     def pedir(metodo, url, **kw):
-        vistas.append((metodo, url))
-        if "snapgen" in url:
-            return Respuesta(200, {"data": []}), ""
+        vistas.append((metodo, url, kw.get("headers") or {}))
+        if "uapi/v1/account" in url:
+            if (kw.get("headers") or {}).get("x-api-key") == "mala":
+                return Respuesta(404, {"detail": {
+                    "error_code": "API_KEY_NOT_FOUND",
+                    "error_message": "Api key is not found"}}), ""
+            return Respuesta(200, {"uuid": "cuenta", "user_credit": {
+                "available_credit": 40, "locked_credit": 0}}), ""
         if "genaipro" in url:
             return Respuesta(200, []), ""
         return Respuesta(200, {"data": []}), ""
@@ -397,11 +467,17 @@ def prueba_comprobar():
     comprobar_claves._pedir = pedir
     try:
         ficha = comprobar_claves.probar_snapgen("abc")
-        igual(ficha["estado"], "ok", "SnapGen se prueba con /v1/models")
-        comprobar(any("/v1/models" in u for _m, u in vistas), "y esa es la URL")
+        igual(ficha["estado"], "ok", "SnapGen se prueba con /uapi/v1/account")
+        comprobar(any("api.snapgen.ai" in u and "/uapi/v1/account" in u
+                      for _m, u, _h in vistas), "y esa es la URL")
+        comprobar(any(h.get("x-api-key") == "abc" for _m, _u, h in vistas),
+                  "la prueba manda x-api-key")
+        comprobar("40" in ficha["mensaje"], "y lee los creditos sin generar")
+        ficha = comprobar_claves.probar_snapgen("mala")
+        igual(ficha["estado"], "mal", "API_KEY_NOT_FOUND no da la clave por buena")
         ficha = comprobar_claves.probar_genaipro("abc")
         igual(ficha["estado"], "ok", "GenAI Pro se prueba con /labs/voices")
-        comprobar(any("genaipro.io" in u and "labs/voices" in u for _m, u in vistas),
+        comprobar(any("genaipro.io" in u and "labs/voices" in u for _m, u, _h in vistas),
                   "sin generar audio, contra genaipro.io")
         ficha = comprobar_claves.probar_snapgen("")
         igual(ficha["estado"], "sin_clave", "sin clave no sale a la red")

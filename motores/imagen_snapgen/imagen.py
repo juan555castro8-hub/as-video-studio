@@ -1,14 +1,25 @@
-"""Motor de imagen sobre SnapGen (gpt-image-2.5-ext).
+"""Motor de imagen sobre snapgen.ai (por defecto gpt-image-2-lower).
 
-Misma interfaz publica que motores/imagen_openai/imagen.py: quien pide una
-imagen no sabe que proveedor la ha hecho. SnapGen cobra por imagen entregada,
-no por tokens, y admite el plano sin referencias (el moodboard descrito).
+Misma interfaz publica que motores/imagen_openai/imagen.py. La cuenta del
+dueno esta en snapgen.ai, no en snapgen.org. El contrato sale de
+https://docs.snapgen.ai (contenido en docs-content.zip):
 
-Las referencias viajan como data URL JPEG, en el mismo orden en que el prompt
-las cita. El cuerpo tiene que quedarse por debajo de 9 MiB: si no cabe, se
-encogen y, si aun asi sobran, se suelta primero la continuidad mas vieja.
+  * base https://api.snapgen.ai, cabecera x-api-key (no Bearer)
+  * POST /uapi/v1/imagen/gpt-image-2-lower, multipart
+  * referencias en el campo repetido `files` (png, jpg, jpeg, webp), hasta 10
+  * 16:9 en `aspect_ratio`; este modelo no admite mode, resolution ni background
+  * la respuesta trae uuid y status 1; se sondea GET /uapi/v1/history/{uuid}
+    hasta status 2 (hecha) o 3 (fallida)
+  * 2 creditos por imagen. El dolar por credito no esta publicado
+  * sin saldo: 402 NOT_ENOUGH_CREDIT o NOT_ENOUGH_AND_LOCK_CREDIT
+  * clave mala: 400 API_KEY_REQUIRED o 404 API_KEY_NOT_FOUND
+  * plan Premium: 402 GPT_IMAGE_2_LOWER_PREMIUM_PLAN_REQUIRED, que no es saldo
+  * la clave se comprueba con GET /uapi/v1/account, que no genera nada
+
+SNAPGEN_MODELO puede cambiar a otro modelo documentado con referencias y 16:9
+(gpt-image-2, nano-banana-pro, nano-banana-2, nano-banana-2-lite). Un nombre
+que las docs no listan no se envia a un endpoint inventado.
 """
-import base64
 import hashlib
 import io
 import json
@@ -17,35 +28,111 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image
 
-API_BASE = os.environ.get("SNAPGEN_API_BASE") or "https://api.snapgen.org/v1"
-MODELO = os.environ.get("SNAPGEN_MODELO") or "gpt-image-2.5-ext"
-#: El apaisado del estudio. 16:9 es el de la ficha; 3:2 tambien vale en el modelo.
-TAMANO_APAISADO = os.environ.get("SNAPGEN_SIZE_APAISADO") or "16:9"
-TAMANOS = {"apaisado": TAMANO_APAISADO, "cuadrado": "1:1", "vertical": "9:16"}
-RATIOS_OK = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9", "auto"}
+API_BASE = "https://api.snapgen.ai"
+MODELO = "gpt-image-2-lower"
+TAMANO_APAISADO = "16:9"
+TAMANOS = {"apaisado": "16:9", "cuadrado": "1:1", "vertical": "9:16"}
 
-TOPE_REFS = 16
-TOPE_CUERPO = 9 * 1024 * 1024
+#: Los ocho ratios de gpt-image-2 y gpt-image-2-lower. Cualquier otro es 400.
+RATIOS_GPT = {"1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "3:2", "2:3"}
+#: generate_image solo documenta estos.
+RATIOS_NANO = {"1:1", "16:9", "9:16", "4:3", "3:4"}
+RESOLUCIONES_GPT = {"1K", "2K", "4K", "8K", "10K", "12K"}
+RESOLUCIONES_NANO = {"1K", "2K", "4K"}
+
+#: Tope documentado de gpt-image-2-lower (files + ref_history). El de los
+#: otros modelos no esta publicado, y no se recorta por una cifra inventada.
+TOPE_REFS = 10
 POLL_S = 12.0
 MAX_ESPERA_S = 600.0
 ESPERA_LIMITE_S = 20.0
 ESPERA_MAXIMA_S = 120.0
 
-_gasto = {"usd": 0.0, "llamadas": 0}
+_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+#: familia: lower | gpt | nano. Solo entran modelos con referencias y 16:9.
+MODELOS = {
+    "gpt-image-2-lower": {
+        "ruta": "/uapi/v1/imagen/gpt-image-2-lower",
+        "familia": "lower",
+        "tope": 10,
+        "ratios": RATIOS_GPT,
+        "resolucion": "720p",
+    },
+    "gpt-image-2": {
+        "ruta": "/uapi/v1/imagen/gpt-image-2",
+        "familia": "gpt",
+        "tope": None,
+        "ratios": RATIOS_GPT,
+        "resolucion": None,
+    },
+    "nano-banana-pro": {
+        "ruta": "/uapi/v1/generate_image",
+        "familia": "nano",
+        "tope": None,
+        "ratios": RATIOS_NANO,
+        "resolucion": None,
+    },
+    "nano-banana-2": {
+        "ruta": "/uapi/v1/generate_image",
+        "familia": "nano",
+        "tope": None,
+        "ratios": RATIOS_NANO,
+        "resolucion": None,
+    },
+    "nano-banana-2-lite": {
+        "ruta": "/uapi/v1/generate_image",
+        "familia": "nano",
+        "tope": None,
+        "ratios": RATIOS_NANO,
+        "resolucion": None,
+    },
+}
+
+CODIGOS_SIN_SALDO = {"NOT_ENOUGH_CREDIT", "NOT_ENOUGH_AND_LOCK_CREDIT"}
+CODIGOS_CLAVE = {"API_KEY_REQUIRED", "API_KEY_NOT_FOUND", "USER_NOT_FOUND"}
+
+_gasto = {"usd": 0.0, "llamadas": 0, "creditos": 0}
 _FRENO = threading.Condition()
 
 
 class SinSaldo(RuntimeError):
-    """No queda saldo en SnapGen, o la clave ha llegado a su tope de gasto."""
+    """No quedan creditos en snapgen.ai, o estan bloqueados por otra generacion."""
 
 
 def _simulado():
     valor = str(os.environ.get("ESTUDIO_SIMULAR", "")).strip().lower()
     return valor not in ("", "0", "false", "no")
+
+
+def api_base():
+    return (os.environ.get("SNAPGEN_API_BASE") or API_BASE).rstrip("/")
+
+
+def modelo_activo():
+    return (os.environ.get("SNAPGEN_MODELO") or MODELO).strip() or MODELO
+
+
+def ficha_modelo(nombre=None):
+    """El modelo documentado, o ValueError si las docs no lo listan."""
+    nombre = (nombre or modelo_activo()).strip()
+    ficha = MODELOS.get(nombre)
+    if not ficha:
+        raise ValueError(
+            f"snapgen.ai no documenta el modelo {nombre!r} con referencias "
+            f"y 16:9. Los que si estan en las docs son: "
+            + ", ".join(sorted(MODELOS)))
+    return nombre, ficha
 
 
 def _carpeta_secretos():
@@ -62,22 +149,52 @@ def _tarifas():
             datos = json.load(fh)
     except (OSError, ValueError):
         datos = {}
-    tabla = ((datos.get("snapgen") or {}).get("usd_por_imagen") or {})
-    return {"1K": 0.0085, "2K": 0.014, "4K": 0.021, **{
-        k: float(v) for k, v in tabla.items() if isinstance(v, (int, float))}}
+    return datos.get("snapgen") or {}
 
 
-def resolucion_de(quality):
-    """low/medium salen a 1K; high a 2K. 4K no se pide solo."""
-    return "2K" if str(quality or "").lower() == "high" else "1K"
+def creditos_publicados(modelo=None):
+    """Creditos por imagen publicados para ese modelo, o None.
+
+    Solo gpt-image-2-lower tiene un precio fijo en las docs (2). El resto
+    calcula por modo y resolucion y no publica la tabla: no se inventa.
+    """
+    nombre = (modelo or modelo_activo()).strip()
+    tabla = _tarifas().get("creditos_por_imagen")
+    if isinstance(tabla, dict):
+        valor = tabla.get(nombre)
+        if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+            return int(valor)
+        return None
+    if nombre == "gpt-image-2-lower":
+        if isinstance(tabla, (int, float)) and not isinstance(tabla, bool):
+            return int(tabla)
+        return 2
+    return None
 
 
-def tamano_de(tamano):
-    puesto = TAMANOS.get(tamano, TAMANOS["apaisado"])
-    if puesto not in RATIOS_OK:
+def usd_de(creditos, modelo=None):
+    """Dolares, o None si usd_por_credito no esta relleno."""
+    if creditos is None:
+        return None
+    bruto = _tarifas().get("usd_por_credito")
+    if not isinstance(bruto, (int, float)) or isinstance(bruto, bool):
+        return None
+    return round(float(creditos) * float(bruto), 6)
+
+
+def tamano_de(tamano, ficha):
+    puesto = os.environ.get("SNAPGEN_SIZE_APAISADO") or TAMANO_APAISADO
+    if tamano in TAMANOS and tamano != "apaisado":
+        puesto = TAMANOS[tamano]
+    elif tamano in TAMANOS:
+        puesto = os.environ.get("SNAPGEN_SIZE_APAISADO") or TAMANOS["apaisado"]
+    elif tamano:
+        puesto = str(tamano)
+    ratios = ficha["ratios"]
+    if puesto not in ratios:
         raise ValueError(
-            f"SnapGen no admite el tamano {puesto!r}. Valen "
-            + ", ".join(sorted(RATIOS_OK)))
+            f"snapgen.ai no admite el tamano {puesto!r} en este modelo. Valen "
+            + ", ".join(sorted(ratios)))
     return puesto
 
 
@@ -181,11 +298,13 @@ def _elegir(fija=None):
     vivas = [c for c in _cuentas() if not c.sin_saldo and not c.clave_rechazada]
     if not vivas and _cuentas() and all(c.clave_rechazada for c in _cuentas()):
         raise RuntimeError(
-            "SnapGen rechaza la clave (401). Revisala en Configuracion.")
+            "SnapGen no reconoce la clave. Se crea en snapgen.ai, en "
+            "Service Integration.")
     if not vivas:
         raise SinSaldo(
-            "SnapGen no tiene saldo, o la clave ha llegado a su tope de gasto. "
-            "Recarga en snapgen.org y retoma: lo ya generado no se vuelve a pagar.")
+            "SnapGen no tiene creditos para esta imagen. Recarga en "
+            "https://snapgen.ai/profile/credits/ y retoma: lo ya generado "
+            "no se vuelve a pagar.")
     return min(vivas, key=lambda c: c.espera_estimada())
 
 
@@ -252,9 +371,12 @@ def _recortar(rutas, tope=TOPE_REFS):
 
     El orden del estudio es estilo, estructura, reparto y, al final, los
     planos anteriores: el ultimo es el mas reciente. La continuidad vieja es
-    la penultima, no la ultima.
+    la penultima, no la ultima. tope None no recorta: ese modelo no publica
+    un maximo.
     """
     rutas = list(rutas)
+    if not tope or tope < 1:
+        return rutas
     while len(rutas) > tope:
         if len(rutas) >= 2:
             del rutas[-2]
@@ -263,62 +385,37 @@ def _recortar(rutas, tope=TOPE_REFS):
     return rutas
 
 
-def _data_url(ruta, lado, calidad):
+def _parte(ruta):
+    """(nombre, bytes, mime) en un formato que el endpoint acepta."""
+    ext = os.path.splitext(ruta)[1].lower()
+    if ext in _MIME:
+        with open(ruta, "rb") as fh:
+            return os.path.basename(ruta), fh.read(), _MIME[ext]
     img = Image.open(ruta).convert("RGB")
-    if max(img.size) > lado:
-        escala = lado / max(img.size)
-        img = img.resize((max(1, int(img.width * escala)),
-                          max(1, int(img.height * escala))), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=calidad, optimize=True)
-    crudo = buf.getvalue()
-    return "data:image/jpeg;base64," + base64.b64encode(crudo).decode("ascii"), crudo
+    img.save(buf, "PNG")
+    base = os.path.splitext(os.path.basename(ruta))[0] + ".png"
+    return base, buf.getvalue(), "image/png"
 
 
-def empaquetar(referencias):
-    """Data URLs en el orden original, con el cuerpo por debajo de 9 MiB.
+def empaquetar(referencias, tope=TOPE_REFS):
+    """Referencias locales listas para el campo multipart `files`.
 
-    Devuelve (rutas_usadas, urls, huellas) donde huellas son los bytes que
-    entran en la clave de idempotencia.
+    Devuelve (rutas_usadas, partes). Cada parte es
+    ("files", (nombre, bytes, mime)). Sin referencias, partes va vacia: el
+    plano de texto sigue siendo valido.
     """
     faltan = [r for r in referencias if not os.path.exists(r)]
     if faltan:
         raise ValueError("estas imagenes de referencia no existen: "
                          + ", ".join(str(f) for f in faltan[:5]))
-    rutas = _recortar(referencias, TOPE_REFS)
-    lado, calidad = 1024, 80
-    while True:
-        pares = [_data_url(r, lado, calidad) for r in rutas]
-        urls = [p[0] for p in pares]
-        peso = sum(len(u.encode("ascii")) for u in urls) + 8192
-        if peso <= TOPE_CUERPO or not rutas:
-            return rutas, urls, [p[1] for p in pares]
-        if lado > 768:
-            lado = 768
-            continue
-        if lado > 512:
-            lado = 512
-            continue
-        if calidad > 45:
-            calidad -= 10
-            continue
-        if len(rutas) > 1:
-            rutas = _recortar(rutas, len(rutas) - 1)
-            lado, calidad = 768, 70
-            continue
-        raise RuntimeError(
-            "la referencia no cabe en 9 MiB ni encogida. SnapGen limita el "
-            "cuerpo de la peticion.")
+    rutas = _recortar(referencias, tope)
+    partes = [("files", _parte(ruta)) for ruta in rutas]
+    return rutas, partes
 
 
-def _clave_idem(prompt, huellas, tamano, resolucion, modelo):
-    firma = hashlib.sha1()
-    firma.update(str(prompt).encode("utf-8"))
-    firma.update(b"\0")
-    firma.update(f"{modelo}|{tamano}|{resolucion}".encode("utf-8"))
-    for trozo in huellas:
-        firma.update(hashlib.sha1(trozo).digest())
-    return firma.hexdigest()
+def _cabeceras(clave):
+    return {"x-api-key": clave, "Accept": "application/json"}
 
 
 def _error_de(respuesta):
@@ -326,48 +423,68 @@ def _error_de(respuesta):
         cuerpo = respuesta.json()
     except ValueError:
         cuerpo = {}
-    error = cuerpo.get("error") if isinstance(cuerpo, dict) else None
-    error = error if isinstance(error, dict) else {}
-    return str(error.get("code") or ""), str(error.get("message") or respuesta.text or "")
+    detalle = cuerpo.get("detail") if isinstance(cuerpo, dict) else None
+    if isinstance(detalle, dict):
+        codigo = str(detalle.get("error_code") or detalle.get("code") or "")
+        mensaje = str(detalle.get("error_message") or detalle.get("message") or "")
+        return codigo, mensaje
+    if isinstance(detalle, str):
+        return "", detalle
+    return "", str(getattr(respuesta, "text", "") or "")[:300]
 
 
-def _url_invalida(codigo, mensaje):
-    texto = f"{codigo} {mensaje}".lower()
-    return ("invalid_image" in texto or "invalid image url" in texto
-            or "image url" in texto and "invalid" in texto)
+def _es_premium(codigo):
+    return codigo == "PREMIUM_PLAN_REQUIRED" or codigo.endswith("_PREMIUM_PLAN_REQUIRED")
 
 
-def _id_tarea(respuesta):
-    cabecera = (respuesta.headers or {}).get("x-gateway-task-id")
-    if cabecera:
-        return str(cabecera).strip()
-    lugar = (respuesta.headers or {}).get("Location") or ""
-    if "/tasks/" in lugar:
-        return lugar.rstrip("/").rsplit("/", 1)[-1]
-    try:
-        cuerpo = respuesta.json()
-    except ValueError:
-        cuerpo = {}
-    if isinstance(cuerpo, dict):
-        for clave in ("id", "task_id"):
-            if cuerpo.get(clave):
-                return str(cuerpo[clave])
-    return ""
-
-
-def _urls_de(cuerpo):
+def _estado(cuerpo):
     if not isinstance(cuerpo, dict):
-        return []
-    datos = cuerpo.get("data")
-    if isinstance(datos, list):
-        return [d.get("url") for d in datos if isinstance(d, dict) and d.get("url")]
-    resultado = cuerpo.get("result") if isinstance(cuerpo.get("result"), dict) else {}
-    urls = resultado.get("urls") or resultado.get("url")
-    if isinstance(urls, str):
-        return [urls]
-    if isinstance(urls, list):
-        return [u for u in urls if u]
-    return []
+        return 1
+    bruto = cuerpo.get("status")
+    try:
+        return int(bruto)
+    except (TypeError, ValueError):
+        texto = str(cuerpo.get("status_desc") or bruto or "").strip().lower()
+        if texto in ("2", "completed", "complete"):
+            return 2
+        if texto in ("3", "failed", "error"):
+            return 3
+        return 1
+
+
+def _creditos_de(cuerpo, modelo):
+    if isinstance(cuerpo, dict):
+        for clave in ("used_credit", "estimated_credit"):
+            valor = cuerpo.get(clave)
+            if isinstance(valor, bool) or valor is None or valor == "":
+                continue
+            try:
+                numero = int(valor)
+            except (TypeError, ValueError):
+                continue
+            if numero > 0:
+                return numero
+    return creditos_publicados(modelo)
+
+
+def _url_imagen(cuerpo):
+    """URL o ('b64', datos) de la imagen terminada. None si todavia no esta."""
+    if not isinstance(cuerpo, dict):
+        return None
+    imagenes = cuerpo.get("generated_image") or []
+    if isinstance(imagenes, list):
+        for item in imagenes:
+            if not isinstance(item, dict):
+                continue
+            for clave in ("image_url", "file_download_url", "image_uri"):
+                if item.get(clave):
+                    return str(item[clave])
+            if item.get("base64_data"):
+                return ("b64", item["base64_data"])
+    resultado = cuerpo.get("generate_result")
+    if isinstance(resultado, str) and resultado.startswith(("http://", "https://")):
+        return resultado
+    return None
 
 
 def _a_png(contenido):
@@ -377,12 +494,21 @@ def _a_png(contenido):
     return buf.getvalue()
 
 
+def _host_de(url):
+    return (urlparse(url).hostname or "").lower()
+
+
 def _bajar(url, clave):
+    if isinstance(url, tuple) and url and url[0] == "b64":
+        import base64
+        crudo = url[1]
+        if isinstance(crudo, str) and "," in crudo and crudo.strip().startswith("data:"):
+            crudo = crudo.split(",", 1)[1]
+        return _a_png(base64.b64decode(crudo))
     respuesta = requests.get(url, timeout=120)
-    if respuesta.status_code != 200 or not respuesta.content:
-        # el CDN a veces quiere el mismo bearer
-        respuesta = requests.get(
-            url, headers={"Authorization": f"Bearer {clave}"}, timeout=120)
+    propio = _host_de(url) == _host_de(api_base()) or _host_de(url).endswith(".snapgen.ai")
+    if (respuesta.status_code != 200 or not respuesta.content) and propio:
+        respuesta = requests.get(url, headers=_cabeceras(clave), timeout=120)
     if respuesta.status_code != 200 or not respuesta.content:
         raise RuntimeError(
             f"SnapGen ha dado una imagen que no se ha podido bajar "
@@ -390,52 +516,125 @@ def _bajar(url, clave):
     return _a_png(respuesta.content)
 
 
-def _esperar_tarea(cuenta, tarea, progreso=None):
+def _esperar_historia(cuenta, uuid, progreso=None):
     limite = time.monotonic() + MAX_ESPERA_S
+    url = f"{api_base()}/uapi/v1/history/{uuid}"
     while time.monotonic() < limite:
         time.sleep(POLL_S)
-        respuesta = requests.get(
-            f"{API_BASE}/tasks/{tarea}",
-            headers={"Authorization": f"Bearer {cuenta.clave}"},
-            timeout=60)
-        if respuesta.status_code == 401:
+        respuesta = requests.get(url, headers=_cabeceras(cuenta.clave), timeout=60)
+        codigo, mensaje = _error_de(respuesta)
+        if codigo in CODIGOS_CLAVE or respuesta.status_code == 401:
             cuenta.clave_rechazada = True
-            raise RuntimeError("SnapGen rechaza la clave (401) al mirar la tarea")
+            raise RuntimeError(
+                "SnapGen no reconoce la clave al mirar la historia "
+                f"({codigo or respuesta.status_code})")
         if respuesta.status_code != 200:
             continue
         cuerpo = respuesta.json()
-        estado = str(cuerpo.get("status") or "").lower()
-        if callable(progreso) and cuerpo.get("progress") is not None:
-            progreso(cuerpo.get("progress"))
-        if estado == "succeeded":
-            urls = _urls_de(cuerpo)
-            if not urls:
-                raise RuntimeError("SnapGen ha marcado la tarea hecha y no hay imagen")
-            return urls[0], cuerpo
-        if estado in ("failed", "expired"):
-            error = cuerpo.get("error") if isinstance(cuerpo.get("error"), dict) else {}
-            raise RuntimeError(
-                "SnapGen no ha generado la imagen: "
-                + str(error.get("message") or estado))
-        if estado == "reconciliation_required":
-            raise RuntimeError(
-                "SnapGen ha dejado la tarea en reconciliation_required: no se "
-                "vuelve a enviar, hay que mirarla en el panel")
+        estado = _estado(cuerpo)
+        if callable(progreso) and cuerpo.get("status_percentage") is not None:
+            progreso(cuerpo.get("status_percentage"))
+        if estado == 2:
+            encontrado = _url_imagen(cuerpo)
+            if not encontrado:
+                raise RuntimeError(
+                    "SnapGen ha marcado la historia hecha y no hay imagen")
+            return encontrado, cuerpo
+        if estado == 3:
+            detalle = str(cuerpo.get("error_message") or cuerpo.get("error_code")
+                          or cuerpo.get("status_desc") or "failed")
+            raise RuntimeError("SnapGen no ha generado la imagen: " + detalle)
     raise RuntimeError(
         f"SnapGen no ha terminado la imagen en {int(MAX_ESPERA_S)} s "
-        f"(tarea {tarea})")
+        f"(historia {uuid})")
+
+
+def _campos(nombre, ficha, prompt, ratio, quality):
+    campos = {"prompt": prompt, "aspect_ratio": ratio}
+    if ficha["familia"] == "gpt":
+        modo = (os.environ.get("SNAPGEN_MODE") or quality or "low").strip().lower()
+        if modo not in ("low", "medium", "high"):
+            modo = "low"
+        campos["mode"] = modo
+        resolucion = (os.environ.get("SNAPGEN_RESOLUTION") or "").strip()
+        if resolucion:
+            if resolucion not in RESOLUCIONES_GPT:
+                raise ValueError(
+                    f"snapgen.ai no documenta la resolucion {resolucion!r} "
+                    "en gpt-image-2")
+            campos["resolution"] = resolucion
+        fondo = (os.environ.get("SNAPGEN_BACKGROUND") or "").strip()
+        if fondo:
+            if fondo not in ("auto", "transparent", "opaque"):
+                raise ValueError(
+                    f"snapgen.ai no documenta background {fondo!r}")
+            campos["background"] = fondo
+    elif ficha["familia"] == "nano":
+        campos["model"] = nombre
+        resolucion = (os.environ.get("SNAPGEN_RESOLUTION") or "1K").strip()
+        if resolucion not in RESOLUCIONES_NANO:
+            raise ValueError(
+                f"generate_image no documenta la resolucion {resolucion!r}")
+        campos["resolution"] = resolucion
+        campos["output_format"] = "png"
+        estilo = (os.environ.get("SNAPGEN_STYLE") or "").strip()
+        if estilo:
+            campos["style"] = estilo
+    return campos
+
+
+def _multipart(campos, partes):
+    salida = []
+    for clave, valor in campos.items():
+        salida.append((clave, (None, str(valor))))
+    salida.extend(partes or [])
+    return salida
+
+
+def _fallar_http(cuenta, respuesta, codigo, mensaje):
+    """Levanta si el codigo no se reintenta. Devuelve True si hay que reintentar."""
+    texto = mensaje or codigo or f"HTTP {respuesta.status_code}"
+    if codigo in CODIGOS_SIN_SALDO or (
+            respuesta.status_code == 402 and not _es_premium(codigo)):
+        cuenta.sin_saldo = True
+        raise SinSaldo(
+            "SnapGen no tiene creditos para esta imagen "
+            f"({codigo or '402'}). Recarga en "
+            "https://snapgen.ai/profile/credits/ y retoma: lo ya generado "
+            "no se vuelve a pagar.")
+    if _es_premium(codigo):
+        raise RuntimeError(
+            "Este modelo de SnapGen pide el plan Premium "
+            f"({codigo}). No es falta de creditos: el saldo no lo arregla. "
+            + texto[:200])
+    if codigo in CODIGOS_CLAVE or respuesta.status_code == 401:
+        cuenta.clave_rechazada = True
+        raise RuntimeError(
+            "SnapGen no reconoce la clave "
+            f"({codigo or respuesta.status_code}). Se crea en snapgen.ai, "
+            "en Service Integration. " + texto[:200])
+    if respuesta.status_code in (400, 413):
+        raise RuntimeError(
+            f"SnapGen ha rechazado la peticion ({codigo or respuesta.status_code}): "
+            + texto[:300])
+    return False
 
 
 def _png_simulado(prompt, referencias, quality, tamano):
     img = Image.new("RGB", (64, 36), (30, 48, 72))
     buf = io.BytesIO()
     img.save(buf, "PNG")
-    resolucion = resolucion_de(quality)
+    nombre, ficha = ficha_modelo()
+    try:
+        ratio = tamano_de(tamano, ficha)
+    except ValueError:
+        ratio = "16:9"
+    creditos = creditos_publicados(nombre)
     return buf.getvalue(), {
         "segundos": 0.0, "quality": quality, "refs": len(referencias or []),
-        "coste": 0.0, "modelo": MODELO, "tamano": tamano_de(tamano),
-        "resolucion": resolucion, "proveedor": "snapgen", "simulado": True,
-        "usage": {},
+        "coste": None, "creditos": creditos, "modelo": nombre,
+        "tamano": ratio, "resolucion": ficha.get("resolucion"),
+        "proveedor": "snapgen", "simulado": True, "usage": {},
     }
 
 
@@ -446,84 +645,75 @@ def generar(prompt, referencias, *, quality="low", tamano="apaisado",
         return _png_simulado(prompt, referencias, quality, tamano)
     if not str(prompt or "").strip():
         raise ValueError("SnapGen necesita un prompt")
-    ratio = tamano_de(tamano)
-    resolucion = resolucion_de(quality)
-    rutas, urls, huellas = empaquetar(referencias) if referencias else ([], [], [])
-    cuerpo = {"model": MODELO, "prompt": prompt, "resolution": resolucion,
-              "size": ratio, "n": 1}
-    if urls:
-        cuerpo["image_urls"] = urls
-    idem = _clave_idem(prompt, huellas, ratio, resolucion, MODELO)
+    nombre, ficha = ficha_modelo()
+    ratio = tamano_de(tamano, ficha)
+    rutas, partes = empaquetar(referencias, ficha["tope"]) if referencias else ([], [])
+    campos = _campos(nombre, ficha, prompt, ratio, quality)
+    cuerpo = _multipart(campos, partes)
     fija = _Cuenta("clave explicita", api_key) if api_key else None
     ultimo = "SnapGen no ha contestado"
-    precio = _tarifas().get(resolucion, 0.0)
+    url = f"{api_base()}{ficha['ruta']}"
 
     for intento in range(reintentos + 1):
         cuenta = _elegir(fija)
         _esperar(cuenta)
         t0 = time.time()
         respuesta = requests.post(
-            f"{API_BASE}/images/generations",
-            headers={"Authorization": f"Bearer {cuenta.clave}",
-                     "Content-Type": "application/json",
-                     "Prefer": "respond-async",
-                     "Idempotency-Key": idem},
-            json=cuerpo, timeout=200)
+            url, headers=_cabeceras(cuenta.clave), files=cuerpo, timeout=200)
         codigo, mensaje = _error_de(respuesta)
-        if respuesta.status_code in (200, 202):
-            if respuesta.status_code == 200 and _urls_de(respuesta.json()):
-                url = _urls_de(respuesta.json())[0]
-                meta_extra = {}
+        if 200 <= respuesta.status_code < 300:
+            try:
+                creado = respuesta.json()
+            except ValueError:
+                creado = {}
+            if not isinstance(creado, dict) or not creado.get("uuid"):
+                raise RuntimeError(
+                    "SnapGen ha contestado sin uuid: "
+                    + (respuesta.text or "")[:200])
+            estado = _estado(creado)
+            if estado == 3:
+                raise RuntimeError(
+                    "SnapGen no ha generado la imagen: "
+                    + str(creado.get("error_message") or creado.get("status_desc")
+                          or "failed"))
+            if estado == 2 and _url_imagen(creado):
+                destino, historia = _url_imagen(creado), creado
             else:
-                tarea = _id_tarea(respuesta)
-                if not tarea:
-                    raise RuntimeError(
-                        "SnapGen ha contestado 202 sin id de tarea: "
-                        + (respuesta.text or "")[:200])
-                url, meta_extra = _esperar_tarea(cuenta, tarea)
-            png = _bajar(url, cuenta.clave)
-            _gasto["usd"] += precio
+                destino, historia = _esperar_historia(cuenta, str(creado["uuid"]))
+            png = _bajar(destino, cuenta.clave)
+            creditos = _creditos_de(historia, nombre)
+            if creditos is None:
+                creditos = _creditos_de(creado, nombre)
+            precio = usd_de(creditos, nombre)
+            if precio:
+                _gasto["usd"] += precio
+            if creditos:
+                _gasto["creditos"] += int(creditos)
             _gasto["llamadas"] += 1
             return png, {
                 "segundos": round(time.time() - t0, 1),
                 "quality": quality,
                 "refs": len(rutas),
                 "coste": precio,
-                "modelo": MODELO,
+                "creditos": creditos,
+                "modelo": nombre,
                 "tamano": ratio,
-                "resolucion": resolucion,
+                "resolucion": ficha.get("resolucion") or campos.get("resolution"),
                 "proveedor": "snapgen",
                 "usage": {},
-                "charged_microusd": (meta_extra or {}).get("charged_microusd"),
+                "uuid": str(creado.get("uuid") or ""),
             }
-        ultimo = f"HTTP {respuesta.status_code}: {mensaje[:200]}"
-        if respuesta.status_code == 402 or codigo in (
-                "insufficient_funds", "api_key_spend_limit_exceeded"):
-            cuenta.sin_saldo = True
-            raise SinSaldo(
-                "SnapGen no tiene saldo para esta imagen "
-                f"({codigo or '402'}). Recarga en snapgen.org y retoma: "
-                "lo ya generado no se vuelve a pagar.")
-        if respuesta.status_code == 401:
-            cuenta.clave_rechazada = True
-            raise RuntimeError(
-                "SnapGen rechaza la clave (401). Revisala en Configuracion. "
-                + ultimo)
-        if _url_invalida(codigo, mensaje):
-            raise RuntimeError(
-                "SnapGen ha rechazado las imagenes de referencia: hacen falta "
-                "URLs publicas (http o https). " + mensaje[:200])
+        try:
+            _fallar_http(cuenta, respuesta, codigo, mensaje)
+        except (SinSaldo, RuntimeError):
+            raise
+        ultimo = f"HTTP {respuesta.status_code}: {(mensaje or codigo)[:200]}"
         if respuesta.status_code == 429 and intento < reintentos:
             espera = _segundos_de((respuesta.headers or {}).get("retry-after"),
                                   ESPERA_LIMITE_S)
             _frenar(cuenta, max(1.0, espera), "429")
             continue
-        if respuesta.status_code in (502, 503) and intento < reintentos:
-            time.sleep(min(3 * (intento + 1), 30))
-            continue
-        if respuesta.status_code in (400, 413):
-            break
-        if intento < reintentos and respuesta.status_code >= 500:
+        if respuesta.status_code in (500, 502, 503) and intento < reintentos:
             time.sleep(min(3 * (intento + 1), 30))
             continue
         break
@@ -548,4 +738,4 @@ def generar_lote(trabajos, *, concurrencia=4):
 
 
 def gasto():
-    return dict(_gasto, usd=round(_gasto["usd"], 4))
+    return dict(_gasto, usd=round(_gasto["usd"], 4), creditos=int(_gasto["creditos"]))

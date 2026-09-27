@@ -32,13 +32,10 @@
     "nota": "Plan Pro (5 $/mes, 100.000 creditos incluidos) con overages a 65 $ por millon de creditos. En Sonic, 1 credito = 1 caracter, asi que el caracter de mas cuesta 0,000065 $. Se anota el coste MARGINAL a proposito: los 100.000 creditos incluidos ya estan pagados cada mes, y prorratear los 5 $ haria que el mismo video costara distinto segun cuanto se hubiera usado antes. Los eventos anotados antes de fijar esta tarifa no se reescriben: el historico anterior sigue sin importe."
   },
   "snapgen": {
-    "modelo": "gpt-image-2.5-ext",
-    "usd_por_imagen": {
-      "1K": 0.0085,
-      "2K": 0.014,
-      "4K": 0.021
-    },
-    "nota": "Precio por imagen entregada, no por tokens. Las referencias no se cobran aparte. 1K es low y medium; 2K es high. 4K esta en la tabla por si se pide a mano y no lo elige el estudio solo."
+    "modelo": "gpt-image-2-lower",
+    "creditos_por_imagen": 2,
+    "usd_por_credito": null,
+    "nota": "snapgen.ai, no snapgen.org. gpt-image-2-lower es el modelo documentado mas barato con varias imagenes de referencia y 16:9: 2 creditos fijos, salida a 720p, sin escalon de calidad. Las referencias van en multipart y no se cobran aparte. El dolar por credito no esta publicado: null deja el medidor en sin tarifa hasta que se rellene. gpt-image-2 y nano-banana no traen tabla de creditos en las docs, asi que no se les pone un numero."
   },
   "genaipro": {
     "modelo": "eleven_multilingual_v2",

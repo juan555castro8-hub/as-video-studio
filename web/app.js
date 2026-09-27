@@ -2356,8 +2356,12 @@ function seccionCalidadImagen() {
   const porcentaje = !snap && base.usd_total
     ? Math.round(100 * base.usd_referencias / base.usd_total) : 0;
   caja.appendChild(h('div', { clase: 'pista' }, snap
-    ? 'SnapGen cobra la imagen entregada. Las referencias no se suman. '
-      + 'Baja y media salen a 1K; alta, a 2K. El número sale de tarifas.json.'
+    ? 'SnapGen (snapgen.ai) cobra 2 créditos por imagen en gpt-image-2-lower, '
+      + 'el modelo por defecto: varias referencias, 16:9 y salida a 720p. La '
+      + 'calidad de abajo no cambia ese precio, porque el modelo no tiene '
+      + 'escalones. El dólar por crédito no está publicado, así que el medidor '
+      + 'dice sin tarifa hasta que se rellene tarifas.json. La calidad sí se '
+      + 'guarda: es el punto de partida si el vídeo vuelve a OpenAI.'
     : 'Lo que se ve aqui NO es el precio de OpenAI: es lo que cuesta el plano '
       + 'entero. A cada imagen se le adjuntan sus referencias de estilo, reparto y '
       + `continuidad, y esas se pagan aparte — en la calidad baja son el ${porcentaje} % `
@@ -2368,15 +2372,18 @@ function seccionCalidadImagen() {
   filas.forEach(fila => {
     const puesta = fila.calidad === elegida;
     const desglose = snap
-      ? (fila.sin_tarifa ? 'sin tarifa' : (fila.resolucion || ''))
+      ? (fila.sin_tarifa ? 'sin tarifa en dólares' : (fila.resolucion || ''))
       : `${fila.usd_imagen.toFixed(3)} la imagen + ${fila.usd_referencias.toFixed(3)} `
         + 'las referencias';
     const veces = snap
-      ? (fila.sin_tarifa ? ''
-        : (fila.veces_total > 1 ? `×${fila.veces_total}` : '1K'))
+      ? (fila.resolucion || 'precio fijo')
       : (fila.veces_total > 1
         ? `×${fila.veces_total} de coste real, no ×${fila.veces_imagen}`
         : 'la mas barata');
+    const precio = snap
+      ? (fila.creditos != null ? `${fila.creditos} créditos` : 'sin tarifa')
+      : (fila.sin_tarifa ? 'sin tarifa'
+        : `${fila.usd_total.toFixed(3)} $ por imagen`);
     caja.appendChild(h('button', {
       clase: 'fila-calidad' + (puesta ? ' elegida' : ''),
       disabled: puesta,
@@ -2385,10 +2392,7 @@ function seccionCalidadImagen() {
       onclick: () => guardarCalidadImagen(fila.calidad),
     },
       h('span', { clase: 'nombre' }, fila.calidad),
-      h('span', { clase: 'precio' }, fila.sin_tarifa
-        ? 'sin tarifa'
-        : `${(snap ? String(Math.round(fila.usd_total * 10000) / 10000)
-            : fila.usd_total.toFixed(3))} $ por imagen`),
+      h('span', { clase: 'precio' }, precio),
       h('span', { clase: 'meta desglose' }, desglose),
       h('span', { clase: 'meta veces' }, veces)));
   });
@@ -2461,7 +2465,9 @@ function seccionProveedores(ficha) {
   caja.appendChild(h('div', { clase: 'campo proveedor-elige' },
     h('label', {}, 'Imágenes'), imagen));
   caja.appendChild(campoClaveProveedor(ficha, 'snapgen', 'Clave de SnapGen',
-    'api.snapgen.org, modelo gpt-image-2.5-ext. No sustituye a OpenAI: se elige arriba.'));
+    'api.snapgen.ai, cabecera x-api-key, modelo gpt-image-2-lower '
+    + '(2 créditos, 16:9, hasta 10 referencias). El dólar por crédito no está '
+    + 'publicado: el gasto sale como «sin tarifa». No sustituye a OpenAI: se elige arriba.'));
 
   const voz = h('select', {
     onchange: e => guardarClaves({ proveedores: { voz: e.target.value } }),
@@ -3832,7 +3838,8 @@ function importeCoste(ficha, hueco) {
   // 'esto no cuesta nada', cuando lo cierto es que todavia no se ha usado
   if (hueco && !ficha.eventos) return h('span', { clase: 'meta' }, '—');
   if (ficha.sin_tarifa && !ficha.usd) {
-    return h('span', { clase: 'sin-tarifa', title: 'falta la tarifa por carácter en tarifas.json' },
+    return h('span', { clase: 'sin-tarifa',
+      title: 'falta la tarifa en tarifas.json: se anota el uso y no se inventa un dólar' },
       'sin tarifa');
   }
   if (ficha.usd === null || ficha.usd === undefined) {
@@ -3857,6 +3864,14 @@ function pintarCoste() {
 
   nodo.appendChild(h('span', { clase: 'prov' }, h('b', {}, 'OpenAI'), importeCoste(abierto),
     h('span', { clase: 'meta' }, `${corto(abierto.tokens.total)} tok`)));
+  const snap = proveedorDe(datos, 'snapgen');
+  if (snap.eventos || snap.cantidad.imagenes) {
+    nodo.appendChild(h('span', { clase: 'prov' }, h('b', {}, 'SnapGen'),
+      importeCoste(snap, true),
+      snap.cantidad.imagenes
+        ? h('span', { clase: 'meta' }, `${corto(snap.cantidad.imagenes)} img`)
+        : null));
+  }
   nodo.appendChild(h('span', { clase: 'prov' }, h('b', {}, 'TTS'), importeCoste(voz),
     h('span', { clase: 'meta' }, `${corto(voz.cantidad.caracteres)} car`)));
   // Claude va sin importe y no entra en el TOTAL
@@ -6869,6 +6884,14 @@ function costeLightAhora() {
     abierto.cantidad.imagenes
       ? h('span', { clase: 'meta' }, `${corto(abierto.cantidad.imagenes)}`)
       : null));
+  const snap = proveedorDe(datos, 'snapgen');
+  if (snap.eventos || snap.cantidad.imagenes) {
+    caja.appendChild(h('span', { clase: 'prov' }, h('b', {}, 'SnapGen'),
+      importeCoste(snap, true),
+      snap.cantidad.imagenes
+        ? h('span', { clase: 'meta' }, `${corto(snap.cantidad.imagenes)} img`)
+        : null));
+  }
   caja.appendChild(h('span', { clase: 'prov' }, h('b', {}, 'Voz'),
     importeCoste(voz, true)));
   // Claude va sin importe y no entra en el TOTAL
