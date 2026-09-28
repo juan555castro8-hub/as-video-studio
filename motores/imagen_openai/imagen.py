@@ -28,6 +28,7 @@ import requests
 from PIL import Image
 
 API_URL = "https://api.openai.com/v1/images/edits"
+API_GENERACIONES = "https://api.openai.com/v1/images/generations"
 MODELO = "gpt-image-2"
 
 PRECIO = {"low": 0.006, "medium": 0.041, "high": 0.165}
@@ -591,20 +592,68 @@ def _al_dia(destino, origen):
         return False
 
 
+def _generar_sin_refs(prompt, quality, tamano, api_key, reintentos):
+    """Texto solo, por /images/generations. /images/edits exige un adjunto."""
+    cuenta_fija = _Cuenta("clave explicita", api_key) if api_key else None
+    ultimo_error = None
+    r = None
+    cuerpo = {"model": MODELO, "prompt": prompt, "size": TAMANOS[tamano],
+              "quality": quality, "n": 1}
+    for intento in range(reintentos + 1):
+        cuenta = cuenta_fija or _elegir_cuenta(1)
+        _esperar_turno(cuenta)
+        _pedir_ficha(1, cuenta)
+        t0 = time.time()
+        r = requests.post(API_GENERACIONES,
+                          headers={"Authorization": f"Bearer {cuenta.clave}",
+                                   "Content-Type": "application/json"},
+                          json=cuerpo, timeout=600)
+        segundos = time.time() - t0
+        try:
+            _calibrar(r, cuenta)
+        except Exception:                          # noqa: BLE001
+            pass
+        if r.status_code == 200:
+            payload = r.json()
+            dato = (payload.get("data") or [{}])[0]
+            if dato.get("b64_json"):
+                png = base64.b64decode(dato["b64_json"])
+            elif dato.get("url"):
+                bajada = requests.get(dato["url"], timeout=120)
+                bajada.raise_for_status()
+                png = bajada.content
+            else:
+                raise RuntimeError("OpenAI ha contestado sin imagen")
+            _gasto["usd"] += PRECIO[quality]
+            _gasto["llamadas"] += 1
+            return png, {"segundos": round(segundos, 1), "quality": quality,
+                         "refs": 0, "coste": PRECIO[quality], "modelo": MODELO,
+                         "tamano": TAMANOS[tamano], "usage": payload.get("usage") or {},
+                         "proveedor": "openai"}
+        ultimo_error = f"HTTP {r.status_code}: {r.text[:200]}"
+        if _sin_saldo(r):
+            cuenta.sin_saldo = True
+            raise SinSaldo(
+                "la cuenta de OpenAI se ha quedado sin credito, asi que no se "
+                "pueden generar mas imagenes.")
+        if r.status_code == 401:
+            cuenta.clave_rechazada = True
+            raise RuntimeError("OpenAI rechaza la clave (401). " + ultimo_error)
+        if r.status_code in (429, 500, 502, 503, 504) and intento < reintentos:
+            time.sleep(min(3 * (intento + 1), 30))
+            continue
+        break
+    raise RuntimeError(ultimo_error)
+
+
 def generar(prompt, referencias, *, quality="low", tamano="apaisado",
             api_key=None, reintentos=6):
-    # Sin referencias esta llamada NO se puede hacer, y hay que decirlo aqui.
-    # Motivo: requests solo pone 'multipart/form-data' cuando files no esta
-    # vacio; con la lista vacia cae a 'x-www-form-urlencoded', que es justo lo
-    # que /v1/images/edits rechaza. El sintoma era un 400 de la API diciendo
-    # "Unsupported content type", que suena a fallo del servidor y manda a
-    # buscar al sitio equivocado, cuando lo que pasa es que falta una entrada.
+    # Sin referencias NO se llama a /images/edits: requests, con la lista de
+    # ficheros vacia, manda x-www-form-urlencoded y la API contesta
+    # "Unsupported content type", que no dice que faltaba el adjunto. El plano
+    # de texto solo (el moodboard descrito) va por /images/generations.
     if not referencias:
-        raise ValueError(
-            "generar() necesita al menos una imagen de referencia: la API de "
-            "edicion de imagenes se llama con adjuntos, y sin ellos la peticion "
-            "sale con el formato equivocado y la rechaza con un error que no "
-            "explica nada. Pon al menos una imagen de estilo.")
+        return _generar_sin_refs(prompt, quality, tamano, api_key, reintentos)
     faltan = [r for r in referencias if not os.path.exists(r)]
     if faltan:
         raise ValueError("estas imagenes de referencia no existen: "

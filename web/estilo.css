@@ -2427,6 +2427,25 @@ button.avisa:hover:not(:disabled) { border-color: var(--aviso); }
 
 /* las referencias adjuntas a una nota de una imagen, en pequeño y al lado */
 .nota-adjuntas { display: inline-flex; gap: 4px; align-items: center; }
+/* El montaje de este video: temperamento y volver a sortearlo. Sin style
+   en linea: la CSP del proxy las tira. */
+.montaje-mandos {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 4px 0 14px;
+}
+.proveedor-elige select {
+  background: var(--papel); color: inherit;
+  border: 1px solid var(--linea); border-radius: 6px;
+  padding: 6px 8px; min-height: var(--toque); max-width: 100%;
+}
+
+.montaje-mandos select {
+  background: var(--papel); color: inherit;
+  border: 1px solid var(--linea); border-radius: 6px;
+  padding: 6px 8px; min-height: var(--toque);
+}
+.montaje-mandos .mando { margin-top: 0; }
+
 .nota-adjuntas img {
   width: 36px; height: 24px; object-fit: cover; border-radius: 4px;
   border: 1px solid var(--linea); cursor: zoom-in;

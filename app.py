@@ -882,6 +882,15 @@ def crear_proyecto(cuerpo: dict = Body(default=None)):
         # un ajuste ilegible no puede impedir crear un proyecto: se queda con
         # el valor por defecto del paso, que es el que habia antes de todo esto
         pass
+    # Los subtitulos tambien se copian al crear. Apagarlos despues, en el
+    # ajuste global, reescribe esta clave (es gratis) para que el video quede
+    # obsoleto y se pueda remontar sin la linea.
+    try:
+        ctx.estado.actualizar_params(
+            "callouts",
+            {"subtitulos": bool(AJUSTES.leer().get("subtitulos", True))})
+    except Exception:  # noqa: BLE001
+        pass
     ctx.bitacora.anotar("proyecto_creado", None, {"nombre": nombre, "id": proyecto.id})
     return {"proyecto": ficha_proyecto(ctx),
             "pasos": [ficha_paso(ctx, p["id"]) for p in PASOS]}
@@ -1772,7 +1781,8 @@ def catalogo_voces_global(idioma: str = Query(default=None),
     except (Exception, SystemExit) as fallo:  # noqa: BLE001
         raise ErrorApi(502, f"no se ha podido leer el catalogo de voces: {fallo}")
     return {"voces": voces, "total": len(voces), "idioma": idioma,
-            "solo_nativas": bool(nativas or solo_nativas)}
+            "solo_nativas": bool(nativas or solo_nativas),
+            "proveedor": PASOS_MODULOS.claves.proveedor_voz()}
 
 
 # ------------------------------------------------------------ voz descrita
@@ -2346,8 +2356,10 @@ def coste_global(limite: int = Query(default=0)):
 @app.get("/api/coste/tarifas")
 def leer_tarifas():
     """Tabla de tarifas. Vive en un unico sitio: estudio/tarifas.json."""
+    voz = COSTE._proveedor_voz_activo()
     return {"tarifas": COSTE.tarifas(refrescar=True), "ruta": COSTE.RUTA_TARIFAS,
-            "usd_por_caracter": COSTE.tarifa_caracter()}
+            "usd_por_caracter": COSTE.tarifa_caracter(voz),
+            "proveedor_voz": voz}
 
 
 @app.put("/api/coste/tarifas")
@@ -2357,14 +2369,19 @@ def escribir_tarifas(cuerpo: dict = Body(default=None)):
     cambios = datos.get("tarifas") if isinstance(datos.get("tarifas"), dict) else datos
     if not cambios:
         raise ErrorApi(400, "no hay nada que cambiar en las tarifas")
+    voz = COSTE._proveedor_voz_activo()
     if "usd_por_caracter" in cambios:
-        # atajo comodo: lo unico que se rellena a mano es el precio de Cartesia
-        cambios = {"tts": {"usd_por_caracter": cambios["usd_por_caracter"]}}
+        # atajo de la pantalla: el precio por caracter del proveedor de voz
+        # que esta elegido. Cartesia vive en `tts`; GenAI Pro, en `genaipro`.
+        bloque = "genaipro" if voz == "genaipro" else "tts"
+        cambios = {bloque: {"usd_por_caracter": cambios["usd_por_caracter"]}}
     try:
         tabla = COSTE.guardar_tarifas(cambios)
     except (TypeError, OSError) as fallo:
         raise ErrorApi(400, f"no se han podido guardar las tarifas: {fallo}")
-    return {"tarifas": tabla, "usd_por_caracter": COSTE.tarifa_caracter()}
+    return {"tarifas": tabla,
+            "usd_por_caracter": COSTE.tarifa_caracter(voz),
+            "proveedor_voz": voz}
 
 
 # -------------------------------------------------------- ajustes del CLI
@@ -4355,6 +4372,12 @@ def leer_previsualizacion(pid: str):
     # texto de antes de la corrección y el MP4 el de después: dos caminos para
     # lo mismo, y uno de los dos viejo.
     params_callouts = ctx.estado.params("callouts") or {}
+    con_subtitulos = True
+    if PASOS_MODULOS is not None:
+        try:
+            con_subtitulos = PASOS_MODULOS.montaje.quiere_subtitulos(params_callouts)
+        except Exception:  # noqa: BLE001
+            con_subtitulos = True
     medir, banda = _medidor_de_subtitulo(ctx, plan)
     escenas = []
     for escena in escenas_plan:
@@ -4370,19 +4393,21 @@ def leer_previsualizacion(pid: str):
         # parte MIDIENDO con la fuente que dibuja (`subtitulos.dos_lineas` con
         # el medidor de `p7_callouts`, ver SUB_PESO alli). Se parte aqui, con la
         # misma cuenta, y el navegador solo pinta las lineas ya hechas.
-        try:
-            trozos = subtitulos.de_escena(
-                escena, idioma=idioma,
-                # los mismos trozos que el render: en vertical son mas cortos
-                cap_linea=PASOS_MODULOS.p7_callouts.cap_subtitulo_de(
-                    params_callouts, plan),
-                cap_trozo=PASOS_MODULOS.p7_callouts.cap_trozo_subtitulo(
-                    PASOS_MODULOS.p7_callouts.cap_subtitulo_de(params_callouts, plan),
-                    PASOS_MODULOS.p7_callouts.salida_de(plan)),
-                texto=PASOS_MODULOS.p7_callouts.texto_subtitulo_de(
-                    params_callouts, f"escena:{sid}")) or []
-        except Exception:                                     # noqa: BLE001
-            trozos = []
+        trozos = []
+        if con_subtitulos:
+            try:
+                trozos = subtitulos.de_escena(
+                    escena, idioma=idioma,
+                    # los mismos trozos que el render: en vertical son mas cortos
+                    cap_linea=PASOS_MODULOS.p7_callouts.cap_subtitulo_de(
+                        params_callouts, plan),
+                    cap_trozo=PASOS_MODULOS.p7_callouts.cap_trozo_subtitulo(
+                        PASOS_MODULOS.p7_callouts.cap_subtitulo_de(params_callouts, plan),
+                        PASOS_MODULOS.p7_callouts.salida_de(plan)),
+                    texto=PASOS_MODULOS.p7_callouts.texto_subtitulo_de(
+                        params_callouts, f"escena:{sid}")) or []
+            except Exception:                                 # noqa: BLE001
+                trozos = []
         escenas.append({
             "id": sid,
             "t_in": round(float(escena.get("t_in") or 0.0), 3),
@@ -4442,6 +4467,7 @@ def leer_previsualizacion(pid: str):
         # ensenar una pantalla a medias sin explicacion
         "con_cartelas": bool(ctx.proyecto.version_activa("callouts")),
         "montado": bool(_ruta_de_version(ctx, "render", "video.mp4")),
+        "subtitulos_activos": con_subtitulos,
     }
 
 
@@ -5073,10 +5099,42 @@ def leer_transiciones(pid: str):
     # copias del mismo texto.
     plan = PASOS_MODULOS.p6_assets.plan_actual(ctx.proyecto, "assets", estado=ctx.estado) or {}
     escenas = plan.get("escenas") or []
-    reparto = trans.resolver(escenas, render, semilla=(plan.get("semilla") or 0))
+    doc_montaje = _documento_montaje(ctx)
+    if doc_montaje.get("planos"):
+        reparto = PASOS_MODULOS.montaje.cortes_de(
+            escenas, render, semilla_plan=(plan.get("semilla") or 0),
+            documento=doc_montaje)
+    else:
+        reparto = trans.resolver(escenas, render, semilla=(plan.get("semilla") or 0))
     ficha["reparto"] = {sid: {k: v for k, v in corte.items() if k != "shader"}
                         for sid, corte in reparto.items()}
     return ficha
+
+
+def _documento_montaje(ctx):
+    """El plan de montaje de la version activa de callouts, si ya se ha hecho.
+
+    Leer no escribe: abrir la pantalla no puede mover una firma.
+    """
+    if PASOS_MODULOS is None:
+        return {}
+    ruta = PASOS_MODULOS.medios.salida_de(
+        ctx.proyecto, "callouts", claves=("montaje",),
+        patrones=(r"montaje\.json",), estado=ctx.estado)
+    if not ruta or not os.path.isfile(ruta):
+        return {}
+    datos = PASOS_MODULOS.medios.leer_json(ruta, {}) or {}
+    return datos if isinstance(datos, dict) else {}
+
+
+def _intensidades_montaje(ctx):
+    """Intensidad 1-5 por plano, para el arco de la musica. None si no hay."""
+    planos = (_documento_montaje(ctx).get("planos") or {})
+    salida = {}
+    for sid, ficha in planos.items():
+        if isinstance(ficha, dict) and ficha.get("intensidad") is not None:
+            salida[str(sid)] = ficha.get("intensidad")
+    return salida or None
 
 
 # ------------------------------------------------------- música y efectos
@@ -5229,6 +5287,10 @@ def _correr_banda(avisar, ctx, tramos):
         largo = (float(escenas[-1].get("t_out") or 0)
                  - float(escenas[0].get("t_in") or 0))
     avisar(0.05, "leyendo el ritmo del montaje")
+    if tramos is None:
+        intens = _intensidades_montaje(ctx)
+        if intens:
+            tramos = sonido.arco_del_video(escenas, largo, intensidades=intens)
     ficha = sonido.montar_banda(escenas, largo, avisar=avisar, tramos=tramos)
     ctx.estado.actualizar_params("render", {"musica": ficha})
     ctx.bitacora.anotar("banda_sonora", "render", {
@@ -5254,7 +5316,8 @@ def leer_arco(pid: str):
     if not largo and escenas:
         largo = (float(escenas[-1].get("t_out") or 0)
                  - float(escenas[0].get("t_in") or 0))
-    return {"tramos": sonido.arco_del_video(escenas, largo),
+    intens = _intensidades_montaje(ctx)
+    return {"tramos": sonido.arco_del_video(escenas, largo, intensidades=intens),
             "duracion": largo, "planos": len(escenas)}
 
 
@@ -5368,18 +5431,129 @@ def leer_ajustes():
     return {"ajustes": AJUSTES.leer(),
             "calidades": list(AJUSTES.CALIDADES),
             "costes": AJUSTES.tabla_de_costes(),
+            "costes_snapgen": AJUSTES.tabla_snapgen(),
             "tamano": AJUSTES.TAMANO}
 
 
 @app.put("/api/ajustes")
 def guardar_ajustes(cuerpo: dict = Body(default=None)):
-    """Cambia ajustes. NO toca ningun proyecto: es el valor de los NUEVOS."""
+    """Cambia ajustes.
+
+    La calidad NO toca ningun proyecto: es el valor de los NUEVOS, porque
+    entra en la firma de cada imagen. Los subtitulos si se copian, y solo
+    cuando el cuerpo los trae y el valor cambia: son gratis, y sin mover la
+    firma de callouts el video seguiria listo con la linea puesta.
+    """
+    datos = _cuerpo(cuerpo)
+    antes = AJUSTES.leer()
     try:
-        guardados = AJUSTES.guardar(_cuerpo(cuerpo))
+        guardados = AJUSTES.guardar(datos)
     except ValueError as fallo:
         raise ErrorApi(400, str(fallo))
+    if ("subtitulos" in datos
+            and bool(guardados.get("subtitulos")) != bool(antes.get("subtitulos", True))):
+        _propagar_subtitulos(bool(guardados.get("subtitulos")))
     anotar_global("ajustes_guardados", {"ajustes": guardados})
-    return {"ajustes": guardados, "costes": AJUSTES.tabla_de_costes()}
+    return {"ajustes": guardados, "costes": AJUSTES.tabla_de_costes(),
+            "costes_snapgen": AJUSTES.tabla_snapgen()}
+
+
+def _propagar_subtitulos(valor):
+    """Escribe callouts.subtitulos en cada proyecto. No toca imagenes ni voz."""
+    if PASOS_MODULOS is None:
+        return
+    for ficha in Proyecto.listar(raiz_proyectos()):
+        pid = str(ficha.get("id") or "")
+        if not pid:
+            continue
+        try:
+            ctx = contexto(pid)
+            actual = ctx.estado.params("callouts") or {}
+            if "subtitulos" in actual and bool(actual.get("subtitulos")) == bool(valor):
+                continue
+            ctx.estado.actualizar_params("callouts", {"subtitulos": bool(valor)})
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _correr_remonte(avisar, ctx):
+    """Callouts y render, con otra semilla de montaje. Cero llamadas de pago.
+
+    No corre la banda sonora: la musica ya bajada se queda, y la energia del
+    montaje nuevo entra como un desplazamiento de volumen al mezclar.
+    """
+    def parte(base, techo):
+        def _av(valor, mensaje="", publico=""):
+            try:
+                v = float(valor)
+            except (TypeError, ValueError):
+                v = 0.0
+            return avisar(base + (techo - base) * max(0.0, min(1.0, v)),
+                          mensaje, publico)
+        return _av
+
+    avisar(0.01, "montando otra vez, sin tocar imagenes ni voz")
+    _correr_paso(parte(0.02, 0.55), ctx, "callouts", None, {"sin_modelo": True})
+    _correr_paso(parte(0.55, 0.98), ctx, "render", None, None)
+    avisar(1.0, "montaje nuevo")
+    return {"resumen": "montaje nuevo"}
+
+
+@app.get("/api/proyectos/{pid}/montaje")
+def leer_montaje(pid: str):
+    """El montaje de este video: temperamento, arranque, cierre. No escribe."""
+    ctx = contexto(pid)
+    if PASOS_MODULOS is None:
+        raise ErrorApi(503, f"los pasos no se han podido cargar: {ERROR_PASOS}")
+    mod = PASOS_MODULOS.montaje
+    params = ctx.estado.params("callouts") or {}
+    doc = _documento_montaje(ctx)
+    brief = {}
+    try:
+        brief = PASOS_MODULOS.comun.leer_salida(
+            ctx.proyecto, "brief", "brief.json", obligatorio=False) or {}
+    except Exception:  # noqa: BLE001
+        brief = {}
+    return {
+        "temperamento": mod.normalizar_temperamento(params.get("temperamento")),
+        "temperamentos": mod.catalogo_temperamentos(),
+        "plan": mod.resumen_publico(doc),
+        "gancho": doc.get("gancho") or brief.get("gancho") or "",
+        "cierre": doc.get("cierre") or brief.get("cierre") or "",
+        "subtitulos": mod.quiere_subtitulos(params),
+        "aperturas": mod.catalogo_aperturas(),
+    }
+
+
+@app.post("/api/proyectos/{pid}/montaje/sortear", status_code=202)
+def sortear_montaje(pid: str):
+    """Otra semilla de montaje y se rehacen solo callouts y el render.
+
+    Las imagenes y la voz no se tocan: la semilla que entra en sus prompts es
+    otra. Tampoco se llama al modelo del ritmo ni se vuelve a bajar musica.
+    """
+    ctx = contexto(pid)
+    if PASOS_MODULOS is None:
+        raise ErrorApi(503, f"los pasos no se han podido cargar: {ERROR_PASOS}")
+    if ctx.estado.estado_de("callouts") == "bloqueado":
+        faltan = dependencias_que_faltan(ctx, "callouts")
+        raise ErrorApi(409, "el montaje esta bloqueado: falta "
+                            + ", ".join(faltan or ["lo anterior"]),
+                       {"faltan": faltan})
+    activos = ctx.gestor.listar(activos=True)
+    if activos:
+        raise ErrorApi(409, "hay un trabajo en marcha: espera a que termine")
+    mod = PASOS_MODULOS.montaje
+    params = ctx.estado.params("callouts") or {}
+    nueva = mod.semilla_nueva(
+        params.get("semilla_montaje", mod.semilla_de(params, ctx.id)), ctx.id)
+    ctx.estado.actualizar_params("callouts", {"semilla_montaje": int(nueva)})
+    trabajo_id = ctx.gestor.lanzar("remontar", _correr_remonte, ctx, paso="render")
+    _registrar_trabajo(trabajo_id, ctx.id)
+    ctx.bitacora.anotar("remonte", "callouts", {"semilla": int(nueva)})
+    return {"trabajo_id": trabajo_id, "semilla": int(nueva),
+            "trabajo": ctx.gestor.estado(trabajo_id),
+            "eventos": f"/api/trabajos/{trabajo_id}/eventos"}
 
 
 # ------------------------------------------------------------------ enlaces
@@ -5946,7 +6120,7 @@ def _cuentas_de_imagen():
     panel de claves que revienta porque falta PIL no ayuda a nadie.
     """
     try:
-        motor = PASOS_MODULOS.medios.motor("imagen_openai/imagen.py")
+        motor = PASOS_MODULOS.medios.motor_imagen()
         return list(motor.cuentas_para_la_pantalla())
     except SystemExit as fallo:
         # UNA INSTALACION RECIEN HECHA NO TIENE NINGUNA CLAVE, y eso no es un
@@ -7343,7 +7517,8 @@ def _correr_light_voz(avisar, ctx, encargo):
         # los mandos
         voz_fija=encargo.get("voz_id") or "")
     cambios = {c: elegido[c] for c in ("modelo", "voz_id", "voz_nombre",
-                                       "velocidad", "emociones", "hueco_minimo")
+                                       "velocidad", "emociones", "hueco_minimo",
+                                       "voz_origen", "voice_asset_id")
                if elegido.get(c) is not None}
     cambios["idioma"] = encargo["idioma"]
     rellenada = not elegido.get("velocidad_pedida")
@@ -8124,12 +8299,19 @@ def editar_preset_light(preset_id: str, cuerpo: dict = Body(default=None)):
                                 + ", ".join(sorted(sobran)))
         if limpios:
             contenido["voz"] = dict(contenido.get("voz") or {}, **limpios)
-            # y el origen recuerda la voz elegida a mano: rehacer «la voz» con
-            # una frase pone los mandos a ESTA, no vuelve a elegir otra
+            # Un preset de Lyra no es un clon: el id viejo no puede quedarse
+            # y acabar mandandose como voice_asset_id.
+            if limpios.get("voz_origen") == "preset":
+                contenido["voz"].pop("voice_asset_id", None)
+                limpios = dict(limpios)
+                limpios.pop("voice_asset_id", None)
+                sembrado = dict(limpios, voice_asset_id="")
+            else:
+                sembrado = limpios
             if limpios.get("voz_id"):
                 contenido.setdefault("origen", {})["voz_id"] = limpios["voz_id"]
             try:
-                _sembrar_voz(_taller_de(ficha), limpios)
+                _sembrar_voz(_taller_de(ficha), sembrado)
             except ErrorApi:
                 pass            # sin taller el preset sigue siendo correcto
 
@@ -9042,6 +9224,12 @@ def _sembrar_video_light(ctx, datos):
     if guion:
         _validar_params("guion", guion, ctx)
         ctx.estado.actualizar_params("guion", guion)
+    try:
+        ctx.estado.actualizar_params(
+            "callouts",
+            {"subtitulos": bool(AJUSTES.leer().get("subtitulos", True))})
+    except Exception:  # noqa: BLE001
+        pass
     return avisos
 
 

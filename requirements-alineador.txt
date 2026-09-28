@@ -1,0 +1,17 @@
+# Opcional. Marcas de palabra cuando la voz sale de GenAI Pro.
+# Sin esto el estudio reparte el SRT y lo avisa.
+#
+# torch NO va aqui: el indice de CPU tiene que ir el primero, y un
+# requirements no puede cambiar el indice a mitad. Ver el comentario de
+# instalar.sh (paso del alineador):
+#
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-alineador.txt
+#
+# El ctc-forced-aligner de PyPI es otro proyecto. Este es el de Mahmoud Ashraf,
+# que es el que devuelve cada palabra con su instante. El modelo por defecto
+# (MMS-300M, ~1,2 GB, CC-BY-NC) se baja solo a ESTUDIO_MODELOS.
+
+transformers>=4.46
+numpy>=1.26
+ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git

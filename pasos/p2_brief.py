@@ -504,6 +504,26 @@ def ejecutar(proyecto, params, avisar):
         "avisos": avisos,
     }
 
+    # EL ARRANQUE Y EL CIERRE de ESTE video. Van en la salida, no en los
+    # params: escribirlos al abrir la pantalla moveria la firma del guion y
+    # de todo lo que cuelga. Si ya estaban en el brief anterior, se quedan.
+    try:
+        import montaje
+        anterior = comun.leer_salida(proyecto, PASO, "brief.json",
+                                     obligatorio=False) or {}
+        gancho, cierre = montaje.resolver_apertura(
+            montaje.semilla_de({}, getattr(proyecto, "id", "") or ""),
+            params=params, anterior=anterior,
+            proyecto_id=getattr(proyecto, "id", "") or "")
+        if gancho:
+            brief["gancho"] = gancho
+        if cierre:
+            brief["cierre"] = cierre
+        montaje.recordar(getattr(proyecto, "id", "") or "",
+                         gancho=gancho, cierre=cierre)
+    except Exception:                                      # noqa: BLE001
+        pass
+
     avisar(0.85, "escribiendo brief.json")
     comun.escribir_json(os.path.join(trabajo, "brief.json"), brief)
     comun.escribir_texto(os.path.join(trabajo, "brief.txt"), _legible(brief))

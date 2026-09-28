@@ -407,6 +407,12 @@ entorno_python() {
   "$RAIZ/venv/bin/pip" install --quiet --upgrade pip wheel
   "$RAIZ/venv/bin/pip" install --quiet -r "$RAIZ/app/requirements.txt" \
     || fallo "no se han podido instalar las librerias de Python (mira $REGISTRO)."
+  # El alineador de GenAI Pro es opcional (torch de CPU + ctc-forced-aligner,
+  # y un modelo de ~1,2 GB la primera vez). Sin el, las marcas de palabra
+  # salen del SRT y la pantalla lo dice. Para instalarlo:
+  #   "$RAIZ/venv/bin/pip" install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+  #   "$RAIZ/venv/bin/pip" install -r "$RAIZ/app/requirements-alineador.txt"
+  # y ESTUDIO_MODELOS apuntando a donde se cachea el modelo.
   chown -R "$USUARIO:$USUARIO" "$RAIZ/venv"
   bien "$("$RAIZ/venv/bin/python" --version) con fastapi, pillow y numpy"
 
@@ -433,6 +439,7 @@ ESTUDIO_ESTADISTICAS=$RAIZ/datos/estadisticas.json
 ESTUDIO_COSTE_GLOBAL=$RAIZ/datos/coste_global.jsonl
 ESTUDIO_BITACORA_GLOBAL=$RAIZ/datos/bitacora_global.jsonl
 ESTUDIO_MOTORES=$RAIZ/app/motores
+ESTUDIO_MODELOS=$RAIZ/datos/modelos
 # Las fuentes y el navegador son ficheros del sistema, no datos de nadie. Que
 # las fuentes sean LAS MISMAS con las que se midio es el invariante.
 ESTUDIO_FUENTES=$CARPETA_FUENTES

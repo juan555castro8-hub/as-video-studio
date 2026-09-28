@@ -125,6 +125,21 @@ _candado_marcha = _COMPARTIDO.candado
 AL_CARGAR = _COMPARTIDO.al_cargar
 
 
+def motor_imagen():
+    """El motor de imagen que toca: OpenAI o SnapGen, segun las claves.
+
+    El param `motor_imagen` de assets es otra cosa (generar o adoptar arte
+    ya hecho) y no se toca aqui.
+    """
+    try:
+        from . import claves
+    except ImportError:  # la carpeta pasos esta en sys.path
+        import claves
+    ruta = ("imagen_snapgen/imagen.py" if claves.proveedor_imagen() == "snapgen"
+            else "imagen_openai/imagen.py")
+    return motor(ruta)
+
+
 def motor(ruta_relativa):
     """Importa un modulo de C:\\IA\\motores por ruta ('guion/segmentar.py').
 

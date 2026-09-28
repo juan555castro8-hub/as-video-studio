@@ -67,6 +67,11 @@ POR_DEFECTO = {
     # porque es de la instalacion, no de la pantalla: desde el movil no hay
     # que volver a verla.
     "onboarding_visto": False,
+    # LOS SUBTITULOS. A diferencia de la calidad, apagarlos SI se copia a los
+    # proyectos que ya existen (ver guardar_ajustes en app.py): no entran en
+    # la firma de una imagen, y si el ajuste no moviera la de callouts el
+    # video seguiria listo con la linea puesta. Ausente aqui = si.
+    "subtitulos": True,
 }
 
 
@@ -80,6 +85,7 @@ def leer():
     if salida.get("calidad_imagen") not in CALIDADES:
         salida["calidad_imagen"] = POR_DEFECTO["calidad_imagen"]
     salida["onboarding_visto"] = bool(salida.get("onboarding_visto"))
+    salida["subtitulos"] = bool(salida.get("subtitulos", True))
     return salida
 
 
@@ -100,6 +106,8 @@ def guardar(cambios):
                 f"calidad {valor!r}: solo {', '.join(CALIDADES)}")
         if clave == "onboarding_visto" and not isinstance(valor, bool):
             raise ValueError("onboarding_visto es verdadero o falso")
+        if clave == "subtitulos" and not isinstance(valor, bool):
+            raise ValueError("subtitulos es verdadero o falso")
         actual[clave] = valor
     escribir_json(RUTA, actual)
     return actual
@@ -143,4 +151,35 @@ def tabla_de_costes(tamano=TAMANO):
                                if base["usd_total"] else 0.0)
         fila["veces_imagen"] = (round(fila["usd_imagen"] / base["usd_imagen"], 1)
                                 if base["usd_imagen"] else 0.0)
+    return filas
+
+
+def tabla_snapgen():
+    """Lo que cobra snapgen.ai por imagen. El modelo por defecto no tiene escalones.
+
+    gpt-image-2-lower sale a 2 creditos y 720p, igual en baja, media y alta.
+    El dolar por credito no esta publicado: sin_tarifa, no un precio en dolares.
+    """
+    bloque = COSTE.tarifas().get("snapgen") or {}
+    modelo = str(bloque.get("modelo") or "gpt-image-2-lower")
+    creditos = COSTE.creditos_snapgen(modelo)
+    usd = COSTE.tarifa_snapgen(modelo)
+    resolucion = "720p" if modelo == "gpt-image-2-lower" else None
+    filas = []
+    for calidad in CALIDADES:
+        numero = None if usd is None else float(usd)
+        filas.append({
+            "calidad": calidad,
+            "modelo": modelo,
+            "creditos": creditos,
+            "resolucion": resolucion,
+            "usd_imagen": 0.0 if numero is None else round(numero, 4),
+            "usd_referencias": 0.0,
+            "usd_total": 0.0 if numero is None else round(numero, 4),
+            "sin_tarifa": numero is None,
+        })
+    base = filas[0]["usd_total"]
+    for fila in filas:
+        fila["veces_total"] = (round(fila["usd_total"] / base, 1) if base else 0.0)
+        fila["veces_imagen"] = fila["veces_total"]
     return filas

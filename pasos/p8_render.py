@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cartelas  # noqa: E402
 import estadisticas  # noqa: E402
 import medios  # noqa: E402
+import montaje  # noqa: E402
 import sonido  # noqa: E402
 import transiciones  # noqa: E402
 
@@ -366,7 +367,15 @@ if (svg && svg.pauseAnimations) svg.pauseAnimations();
 // cada fotograma la pillaria donde le tocase por reloj de pared.
 if (svgFijo && svgFijo.pauseAnimations) svgFijo.pauseAnimations();
 
-function suavizar(u){ return u*u*(3-2*u); }
+function suavizar(u){
+  u = Math.min(1, Math.max(0, u));
+  const c = (MOV && MOV.curva) || 'suave';
+  if (c === 'lineal') return u;
+  if (c === 'entrada') return u*u*u;
+  if (c === 'salida') { const v = 1-u; return 1 - v*v*v; }
+  if (c === 'cine') return u*u*u*(u*(u*6-15)+10);
+  return u*u*(3-2*u);
+}
 
 // La ventana que da el motor de movimiento es cuadrada en normalizado; el video
 // es 16:9, asi que se respeta el ancho y se recorta el alto sobre el mismo
@@ -424,8 +433,10 @@ def _pagina_de(escena, mov, capa_svg, hyper, p, destino, capa_fija="", fps=30):
             .replace("__FONDO__", _url_local(hyper))
             .replace("__CAPA__", capa_svg)
             .replace("__CAPAFIJA__", capa_fija or "")
-            .replace("__MOV__", json.dumps({"ventana_ini": mov["ventana_ini"],
-                                            "ventana_fin": mov["ventana_fin"]}))
+            .replace("__MOV__", json.dumps({
+                "ventana_ini": mov["ventana_ini"],
+                "ventana_fin": mov["ventana_fin"],
+                "curva": mov.get("curva") or "suave"}))
             .replace("__FPS__", str(int(fps)))
             .replace("__DUR__", f"{duracion:.4f}"))
     return medios.escribir_texto(destino, html)
@@ -1149,11 +1160,20 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_montar=False):
 
     escenas = plan.get("escenas") or []
     fps = int(p["fps"])
-    # QUE transicion concreta lleva cada plano. El plan solo trae la RANURA
-    # (corte / suave / acento), que es una decision del corte; cual la ocupa se
-    # resuelve aqui, al renderizar, contra la paleta elegida en esta pantalla.
-    cortes = transiciones.resolver(escenas, p,
-                                   semilla=(plan.get("semilla") or 0))
+    # QUE transicion concreta lleva cada plano. Si callouts dejo un montaje,
+    # manda ese: es la decision del editor de ESTE video. Sin el fichero se
+    # resuelve como siempre, contra la semilla de las imagenes, y un video ya
+    # montado no cambia de cortes por haber actualizado el estudio.
+    doc_montaje = montaje.abrir_previo(base_callouts)
+    cortes = montaje.cortes_de(escenas, p, semilla_plan=(plan.get("semilla") or 0),
+                               documento=doc_montaje)
+    con_subtitulos = True
+    try:
+        from nucleo.estado import Estado
+        con_subtitulos = montaje.quiere_subtitulos(
+            Estado(proyecto).params("callouts") or {})
+    except Exception:                                          # noqa: BLE001
+        con_subtitulos = True
     pedidas = set(unidades) if unidades is not None else None
     arrastrados = []
     if pedidas is not None:
@@ -1245,8 +1265,9 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_montar=False):
                                   "t_out": escena["t_out"]},
             "mov": {"ventana_ini": mov["ventana_ini"],
                     "ventana_fin": mov["ventana_fin"],
+                    "curva": mov.get("curva") or "",
                     "hyperframe_px": mov.get("hyperframe_px")},
-            "capa": svg, "capa_fija": fija,
+            "capa": svg, "capa_fija": "" if not con_subtitulos else fija,
             "hyper": hyper, "frames": total, "fps": fps,
             "resolucion": [ancho, alto], "calidad": p["calidad_video"],
             "carpeta": os.path.join(dir_frames, sid), "clip": clip,
@@ -1317,8 +1338,10 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_montar=False):
     pista_efectos, sonidos = None, 0
     if p.get("sonido", True):
         avisar(0.93, "montando la banda de efectos")
-        lista_eventos = sonido.eventos(escenas, cortes, p,
-                                       semilla=(plan.get("semilla") or 0))
+        semilla_sfx = plan.get("semilla") or 0
+        if doc_montaje.get("planos") and doc_montaje.get("semilla") is not None:
+            semilla_sfx = doc_montaje.get("semilla") or 0
+        lista_eventos = sonido.eventos(escenas, cortes, p, semilla=semilla_sfx)
         if lista_eventos:
             pista_efectos, sonidos = sonido.pista_de_efectos(
                 lista_eventos, largo, os.path.join(trabajo, "efectos.wav"))
@@ -1345,6 +1368,14 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_montar=False):
         ajuste_musica = float(p.get("musica_db") or 0.0)
     except (TypeError, ValueError):
         ajuste_musica = 0.0
+    # La energia del montaje es un desplazamiento en dB, encima del que haya
+    # puesto quien mira el video. Sin montaje el desplazamiento es cero: el
+    # nivel queda el de siempre. No se vuelve a bajar la musica.
+    if doc_montaje.get("planos") and doc_montaje.get("musica_db") is not None:
+        try:
+            ajuste_musica += float(doc_montaje.get("musica_db") or 0.0)
+        except (TypeError, ValueError):
+            pass
     try:
         ajuste_efectos = float(p.get("efectos_db") or 0.0)
     except (TypeError, ValueError):

@@ -24,9 +24,12 @@ import sys
 #: La carpeta de motores es la que contiene ESTE fichero. Antes era una ruta
 #: fija a una maquina concreta.
 MOTORES = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(MOTORES, "imagen_openai"))
 
-import imagen as motor  # noqa: E402
+
+def _motor():
+    """OpenAI o SnapGen, el que este elegido. Se pide al usarlo, no al importar."""
+    import medios
+    return medios.motor_imagen()
 
 # Sin ventana negra. Estos procesos (yt-dlp, ffmpeg, whisperx) son de consola, y
 # lanzados desde el servicio del Estudio abren una ventana encima de todo por
@@ -105,7 +108,7 @@ def regenerar_directo(proyecto, escena_id, feedback, trazos, generales="",
     # La version rechazada va como referencia: se corrige sobre ella en lugar de
     # empezar de cero, que es lo que hace que el resto del plano no cambie.
     if os.path.exists(anterior):
-        refs.append(motor.normalizar(anterior, cache))
+        refs.append(_motor().normalizar(anterior, cache))
 
     # La ruta del plan la dejo escrita el orquestador al generar; asi no hay que
     # adivinarla cuando conviven varias versiones del plan en la carpeta.
@@ -117,15 +120,15 @@ def regenerar_directo(proyecto, escena_id, feedback, trazos, generales="",
         for rel in plan.get("estilo", {}).get("referencias_estilo", [])[:1]:
             ruta = os.path.join(proyecto, rel)
             if os.path.exists(ruta):
-                refs.append(motor.normalizar(ruta, cache))
+                refs.append(_motor().normalizar(ruta, cache))
         escena = next((e for e in plan["escenas"] if e["id"] == escena_id), {})
         for pid in escena.get("personajes", []):
             hoja = os.path.join(proyecto, "assets", "reparto", f"{pid}.png")
             if os.path.exists(hoja):
-                refs.append(motor.normalizar(hoja, cache))
+                refs.append(_motor().normalizar(hoja, cache))
 
     prompt = prompt_correctivo(registro["prompt"], feedback, trazos, generales)
-    png, info = motor.generar(prompt, refs, quality=quality)
+    png, info = _motor().generar(prompt, refs, quality=quality)
 
     # La version anterior se guarda: si la correccion empeora, hay vuelta atras
     historial = os.path.join(proyecto, "assets", carpeta, "_historial")
