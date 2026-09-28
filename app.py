@@ -7517,7 +7517,8 @@ def _correr_light_voz(avisar, ctx, encargo):
         # los mandos
         voz_fija=encargo.get("voz_id") or "")
     cambios = {c: elegido[c] for c in ("modelo", "voz_id", "voz_nombre",
-                                       "velocidad", "emociones", "hueco_minimo")
+                                       "velocidad", "emociones", "hueco_minimo",
+                                       "voz_origen", "voice_asset_id")
                if elegido.get(c) is not None}
     cambios["idioma"] = encargo["idioma"]
     rellenada = not elegido.get("velocidad_pedida")
@@ -8298,12 +8299,19 @@ def editar_preset_light(preset_id: str, cuerpo: dict = Body(default=None)):
                                 + ", ".join(sorted(sobran)))
         if limpios:
             contenido["voz"] = dict(contenido.get("voz") or {}, **limpios)
-            # y el origen recuerda la voz elegida a mano: rehacer «la voz» con
-            # una frase pone los mandos a ESTA, no vuelve a elegir otra
+            # Un preset de Lyra no es un clon: el id viejo no puede quedarse
+            # y acabar mandandose como voice_asset_id.
+            if limpios.get("voz_origen") == "preset":
+                contenido["voz"].pop("voice_asset_id", None)
+                limpios = dict(limpios)
+                limpios.pop("voice_asset_id", None)
+                sembrado = dict(limpios, voice_asset_id="")
+            else:
+                sembrado = limpios
             if limpios.get("voz_id"):
                 contenido.setdefault("origen", {})["voz_id"] = limpios["voz_id"]
             try:
-                _sembrar_voz(_taller_de(ficha), limpios)
+                _sembrar_voz(_taller_de(ficha), sembrado)
             except ErrorApi:
                 pass            # sin taller el preset sigue siendo correcto
 

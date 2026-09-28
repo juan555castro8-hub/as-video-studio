@@ -790,7 +790,11 @@ def _medir_toma_real(original):
                      detalle={"modelo": cfg.get("modelo"),
                               "voz_id": cfg.get("voz_id"),
                               "idioma": cfg.get("idioma"),
-                              "proveedor": cfg.get("proveedor") or "cartesia"})
+                              "proveedor": cfg.get("proveedor") or "cartesia",
+                              **({"creditos": int(getattr(original, "creditos")),
+                                  "motor": "lyra"}
+                                 if getattr(original, "creditos", None) is not None
+                                 else {})})
         return resultado
     return medido
 

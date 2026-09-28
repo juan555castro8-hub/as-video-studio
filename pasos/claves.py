@@ -86,6 +86,9 @@ MAX_OPENAI = 1
 MAX_SNAPGEN = 4
 PROVEEDORES_IMAGEN = ("openai", "snapgen")
 PROVEEDORES_VOZ = ("cartesia", "genaipro")
+#: El clon de fabrica de Lyra («voz propia 2»). El mismo id vive en
+#: motores/voz_genaipro/voz.py. Vacio en el fichero significa este.
+VOZ_CLON_GENAIPRO = "01a08285-c365-7017-835f-53f700dd3040"
 
 #: Tope de cuentas del CLI. Aqui no lo impone ningun .env: lo impone que la
 #: cadena se recorre EN SERIE cuando falla, asi que cada cuenta de mas es una
@@ -116,7 +119,10 @@ def _vacio():
         # OpenAI y Cartesia. En cuanto hay clave y nadie ha elegido, el
         # proveedor por defecto pasa a ser el nuevo: ver proveedor_imagen.
         "snapgen": [],
-        "genaipro": {"clave": ""},
+        # motor y voice_asset_id vacios significan el defecto del motor
+        # (lyra y el clon), y no se rellenan al leer: escribirlos moveria
+        # el fichero sin que nadie hubiera elegido nada.
+        "genaipro": {"clave": "", "motor": "", "voice_asset_id": ""},
         "proveedores": {"imagen": "", "voz": ""},
     }
 
@@ -191,6 +197,9 @@ def _normalizar(datos):
     genaipro = datos.get("genaipro")
     if isinstance(genaipro, dict):
         base["genaipro"]["clave"] = str(genaipro.get("clave") or "").strip()
+        base["genaipro"]["motor"] = _motor_genaipro(genaipro.get("motor"))
+        base["genaipro"]["voice_asset_id"] = _asset_genaipro(
+            genaipro.get("voice_asset_id"), estricto=False)
     elif isinstance(genaipro, str):
         base["genaipro"]["clave"] = genaipro.strip()
 
@@ -200,6 +209,25 @@ def _normalizar(datos):
     base["proveedores"]["imagen"] = imagen if imagen in PROVEEDORES_IMAGEN else ""
     base["proveedores"]["voz"] = voz if voz in PROVEEDORES_VOZ else ""
     return base
+
+
+def _motor_genaipro(valor):
+    """labs, lyra, o vacio. Vacio es el defecto del motor, no un error."""
+    motor = str(valor or "").strip().lower()
+    if motor in ("labs", "lyra"):
+        return motor
+    return ""
+
+
+def _asset_genaipro(valor, estricto=False):
+    """Un id de clon, o vacio. Al leer, uno mal escrito se deja vacio."""
+    asset = str(valor or "").strip()
+    if asset and not re.match(r"^[A-Za-z0-9_-]{8,80}$", asset):
+        if estricto:
+            raise ErrorClaves(
+                "voice_asset_id no parece un id de clon de GenAI Pro")
+        return ""
+    return asset
 
 
 def _ficha_cli(cruda, ya):
@@ -395,11 +423,28 @@ def _fusionar(actual, peticion):
 
     if "genaipro" in peticion:
         ficha = peticion.get("genaipro")
-        clave = ficha.get("clave") if isinstance(ficha, dict) else ficha
-        clave = str(clave or "").strip()
+        if not isinstance(ficha, dict):
+            ficha = {"clave": ficha}
+        clave = str(ficha.get("clave") or "").strip()
         if clave == CONSERVAR:
             clave = actual["genaipro"]["clave"]
         salida["genaipro"]["clave"] = clave
+        # Cambiar la clave no borra el motor ni el clon: la pantalla manda
+        # solo la clave, y estos dos no bajan enteros si no se tocan.
+        if "motor" in ficha:
+            motor = _motor_genaipro(ficha.get("motor"))
+            pedido = str(ficha.get("motor") or "").strip().lower()
+            if pedido and not motor:
+                raise ErrorClaves("el motor de GenAI Pro es labs o lyra")
+            salida["genaipro"]["motor"] = motor
+        else:
+            salida["genaipro"]["motor"] = actual["genaipro"].get("motor") or ""
+        if "voice_asset_id" in ficha:
+            salida["genaipro"]["voice_asset_id"] = _asset_genaipro(
+                ficha.get("voice_asset_id"), estricto=True)
+        else:
+            salida["genaipro"]["voice_asset_id"] = (
+                actual["genaipro"].get("voice_asset_id") or "")
     else:
         salida["genaipro"] = actual["genaipro"]
 
@@ -719,6 +764,14 @@ def resumen(datos=None):
         "genaipro": {
             "puesta": bool(datos["genaipro"]["clave"]),
             "cola": tapar(datos["genaipro"]["clave"]),
+            # Lo que se ENSENA. Vacio en el fichero es lyra y el clon de
+            # fabrica; motor_elegido y voice_asset_elegido son lo guardado,
+            # y vacios quieren decir que nadie lo ha fijado.
+            "motor": datos["genaipro"].get("motor") or "lyra",
+            "motor_elegido": datos["genaipro"].get("motor") or "",
+            "voice_asset_id": (datos["genaipro"].get("voice_asset_id")
+                               or VOZ_CLON_GENAIPRO),
+            "voice_asset_elegido": datos["genaipro"].get("voice_asset_id") or "",
         },
         "proveedores": {
             "imagen": proveedor_imagen(datos),

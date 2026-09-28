@@ -158,7 +158,7 @@ TIPOS = {
         "que_fija": ("modelo, voz, idioma de locucion, velocidad, emociones y "
                      "aire entre bloques"),
         "claves": ("modelo", "voz_id", "voz_nombre", "idioma", "velocidad",
-                   "emociones", "hueco_minimo"),
+                   "emociones", "hueco_minimo", "voz_origen", "voice_asset_id"),
         "pasos": ("voz",),
     },
     "canal": {

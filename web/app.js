@@ -2478,9 +2478,51 @@ function seccionProveedores(ficha) {
   caja.appendChild(h('div', { clase: 'campo proveedor-elige' },
     h('label', {}, 'Voz'), voz));
   caja.appendChild(campoClaveProveedor(ficha, 'genaipro', 'Clave de GenAI Pro',
-    'genaipro.io, Labs. La API no da el instante de cada palabra: lo saca un '
-    + 'alineador local y, si no está, se reparte el subtítulo y se avisa. El '
-    + 'precio por carácter no está en las tarifas: el gasto sale como «sin tarifa».'));
+    'genaipro.io. El defecto es Lyra, con el clon, en castellano. Labs sigue '
+    + 'siendo el revendedor de ElevenLabs. La API no da el instante de cada '
+    + 'palabra: lo saca un alineador local. El precio en dólares no está en '
+    + 'las tarifas: Lyra gasta 1 crédito por carácter y el medidor sale '
+    + 'como «sin tarifa».'));
+  caja.appendChild(camposGenaiPro(ficha));
+  return caja;
+}
+
+function camposGenaiPro(ficha) {
+  const g = ficha.genaipro || {};
+  const defecto = '01a08285-c365-7017-835f-53f700dd3040';
+  const caja = h('div', {});
+  caja.appendChild(campoSelect(
+    'Motor de GenAI Pro',
+    g.motor || 'lyra',
+    [{ valor: 'lyra', nombre: 'Lyra (clon y presets)' },
+     { valor: 'labs', nombre: 'Labs (ElevenLabs)' }],
+    valor => guardarClaves({
+      genaipro: { clave: CONSERVAR_CLAVE, motor: valor },
+    }),
+    'Lyra usa el clon o un preset del catálogo. Labs es ElevenLabs. '
+    + 'Cambiarlo aquí no reescribe la voz de los vídeos ya guardados.'));
+  const asset = h('input', {
+    type: 'text',
+    placeholder: g.voice_asset_id || defecto,
+  });
+  const puesta = g.voice_asset_elegido || '';
+  caja.appendChild(h('div', { clase: 'campo' },
+    h('label', {}, 'Clon de Lyra'),
+    h('div', { clase: 'pista' },
+      (puesta ? `Guardado: ${puesta}. ` : 'Sin elegir en esta máquina: ')
+      + `el defecto es ${g.voice_asset_id || defecto} (voz propia 2). `
+      + 'Vacío al guardar vuelve a ese. Una voz elegida en el vídeo manda '
+      + 'sobre este campo.'),
+    h('div', { clase: 'fila-clave' }, asset,
+      h('button', {
+        clase: 'mini',
+        onclick: () => guardarClaves({
+          genaipro: {
+            clave: CONSERVAR_CLAVE,
+            voice_asset_id: asset.value.trim(),
+          },
+        }),
+      }, 'Guardar clon'))));
   return caja;
 }
 
@@ -4952,6 +4994,8 @@ function encargoParaServidor() {
     tono_prompt: e.tono_prompt,
     voz_prompt: e.voz_prompt,
     voz_id: e.voz_id || '',
+    voz_origen: e.voz_origen || '',
+    voice_asset_id: e.voice_asset_id || '',
     ritmo: e.ritmo || ritmoPorDefecto(),
   };
 }
@@ -9995,8 +10039,8 @@ function selectorVozPropiaLight(e) {
     const proveedor = (APP.light.voces || {}).proveedor;
     caja.appendChild(h('div', { clase: 'pista' },
       proveedor === 'genaipro'
-        ? 'La voz sale de GenAI Pro: se elige en la lista de arriba. Las '
-          + 'emociones de Cartesia no se locutan; la velocidad sí.'
+        ? 'GenAI Pro no tiene clones en esta cuenta: se elige un preset de '
+          + 'Lyra en la lista de arriba, o se usa el clon por defecto al locutar.'
         : 'No hay voces clonadas en esta cuenta de Cartesia: la voz se elige por la '
           + 'descripción de arriba. Si clonas una, aparecerá aquí.'));
     return caja;
@@ -10004,7 +10048,14 @@ function selectorVozPropiaLight(e) {
   if (e.voz_id && !propias.some(v => v.id === e.voz_id)) e.voz_id = '';
   caja.appendChild(h('label', {}, 'Tus voces (clonadas)'));
   caja.appendChild(h('select', {
-    onchange: ev => { e.voz_id = ev.target.value; tocarEncargoLight(); },
+    onchange: ev => {
+      e.voz_id = ev.target.value;
+      const ficha = propias.find(v => v.id === e.voz_id);
+      e.voz_origen = e.voz_id ? 'clon' : '';
+      e.voice_asset_id = e.voz_id
+        ? ((ficha && (ficha.voice_asset_id || ficha.id)) || e.voz_id) : '';
+      tocarEncargoLight();
+    },
   },
     h('option', { value: '', selected: !e.voz_id },
       '— que la elija por la descripción —'),
@@ -10034,7 +10085,13 @@ function selectorVozLight(ficha, voz, voces, guardar) {
   const cuenta = h('span', { clase: 'meta' });
   const elegir = v => {
     estado.abierto = false;
-    guardar({ voz_id: v.id, voz_nombre: v.nombre || '' });
+    const clon = v.clon === true || v.publica === false;
+    guardar({
+      voz_id: v.id,
+      voz_nombre: v.nombre || '',
+      voz_origen: clon ? 'clon' : 'preset',
+      voice_asset_id: clon ? (v.voice_asset_id || v.id) : '',
+    });
     // el bloque entero y no la pantalla: el rótulo de arriba, la cuadrícula y
     // el botón de escuchar de abajo dicen los tres cuál es la voz puesta
     repintarBloqueVoz(ficha);
@@ -10067,7 +10124,9 @@ function selectorVozLight(ficha, voz, voces, guardar) {
       rejilla.appendChild(h('div', { clase: 'grupo-voces' }, 'Tus voces (clonadas)'));
       propias.forEach(v => rejilla.appendChild(celdaVozLight(ficha, v, voz, elegir)));
       if (catalogo.length) {
-        rejilla.appendChild(h('div', { clase: 'grupo-voces' }, 'Catálogo de Cartesia'));
+        rejilla.appendChild(h('div', { clase: 'grupo-voces' },
+          (APP.light.voces || {}).proveedor === 'genaipro'
+            ? 'Catálogo de Lyra' : 'Catálogo de Cartesia'));
       }
     }
     catalogo.slice(0, TOPE).forEach(v =>

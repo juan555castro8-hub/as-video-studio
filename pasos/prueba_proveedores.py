@@ -19,6 +19,10 @@ os.environ.pop("ESTUDIO_PROVEEDOR_IMAGEN", None)
 os.environ.pop("ESTUDIO_PROVEEDOR_VOZ", None)
 os.environ.pop("SNAPGEN_API_KEY", None)
 os.environ.pop("GENAIPRO_API_KEY", None)
+os.environ.pop("GENAIPRO_MOTOR", None)
+os.environ.pop("GENAIPRO_VOICE_ASSET_ID", None)
+os.environ.pop("GENAIPRO_LYRA_MAX_CHARS", None)
+os.environ.pop("GENAIPRO_LYRA_IDIOMA", None)
 os.makedirs(os.environ["ESTUDIO_SECRETOS"], exist_ok=True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -85,6 +89,32 @@ def prueba_proveedor():
     comprobar("clave" not in json.dumps({k: ficha[k] for k in ("snapgen", "genaipro")}),
               "el resumen no lleva la clave entera")
     comprobar(ficha["snapgen"][0]["cola"].endswith("3456"), "y si la cola")
+    igual(ficha["genaipro"]["motor"], "lyra",
+          "sin motor guardado la pantalla ensena lyra")
+    igual(ficha["genaipro"]["motor_elegido"], "",
+          "y leer no escribe el motor en el fichero")
+    igual(ficha["genaipro"]["voice_asset_id"], claves.VOZ_CLON_GENAIPRO,
+          "el clon de fabrica es voz propia 2")
+    igual(ficha["genaipro"]["voice_asset_elegido"], "",
+          "y leer no escribe el clon")
+    claves.guardar({"genaipro": {
+        "clave": claves.CONSERVAR, "motor": "labs",
+        "voice_asset_id": claves.VOZ_CLON_GENAIPRO}})
+    claves.guardar({"genaipro": {"clave": "jwt-genaipro-999999"}})
+    ficha = claves.resumen()
+    igual(ficha["genaipro"]["motor_elegido"], "labs",
+          "cambiar la clave no borra el motor")
+    igual(ficha["genaipro"]["voice_asset_elegido"], claves.VOZ_CLON_GENAIPRO,
+          "ni el clon")
+    comprobar(ficha["genaipro"]["cola"].endswith("9999"),
+              "y la clave nueva si se guarda")
+    try:
+        claves.guardar({"genaipro": {"clave": claves.CONSERVAR, "motor": "sirius"}})
+        comprobar(False, "un motor que no es labs ni lyra se rechaza")
+    except claves.ErrorClaves:
+        comprobar(True, "un motor que no es labs ni lyra se rechaza")
+    claves.guardar({"genaipro": {
+        "clave": claves.CONSERVAR, "motor": "", "voice_asset_id": ""}})
     claves.guardar({"proveedores": {"imagen": "openai", "voz": "cartesia"}})
     igual(claves.proveedor_imagen(), "openai", "elegir OpenAI se queda")
     igual(claves.proveedor_voz(), "cartesia", "y Cartesia tambien")
@@ -419,6 +449,226 @@ def prueba_voz():
     comprobar(pcm, "y se baja el MP3 de result")
 
 
+def prueba_lyra():
+    print("lyra")
+    voz = medios.motor("voz_genaipro/voz.py")
+    igual(voz.VOZ_CLON_DEFECTO, claves.VOZ_CLON_GENAIPRO,
+          "el clon de fabrica es el mismo en el motor y en las claves")
+    igual(voz.motor_de_toma({}), "lyra", "sin eleccion el motor es lyra")
+    igual(voz.elegir_voz_lyra({"voz_id": "cartesia-sonido-largo", "idioma": "es"}),
+          ("voice_asset_id", voz.VOZ_CLON_DEFECTO),
+          "un voz_id de Cartesia no se manda como preset de Lyra")
+    igual(voz.elegir_voz_lyra({
+        "voz_origen": "preset", "voz_id": "preset-lyra-1", "idioma": "es"}),
+          ("voice_id", "preset-lyra-1"), "un preset manda voice_id")
+    igual(voz.elegir_voz_lyra({
+        "voz_origen": "clon", "voice_asset_id": voz.VOZ_CLON_DEFECTO,
+        "voz_id": voz.VOZ_CLON_DEFECTO}),
+          ("voice_asset_id", voz.VOZ_CLON_DEFECTO), "un clon manda voice_asset_id")
+    igual(voz.idioma_lyra({}), "es", "sin idioma se manda es, no vi")
+    igual(voz.idioma_lyra({"idioma": "en"}), "en", "el idioma del video si se manda")
+    igual(voz.tope_lyra(), 0, "Lyra no trocea si no hay tope")
+    alinear = medios.motor("alineador/alinear.py")
+    igual(alinear.MODELO_COMERCIAL_ES,
+          "jonatasgrosman/wav2vec2-large-xlsr-53-spanish",
+          "hay un CTC en castellano con licencia comercial para cambiar el modelo")
+
+    real = voz.audio()
+    sesion_original = voz._sesion
+
+    class Alineador:
+        llamadas = 0
+
+        class AlineadorAusente(RuntimeError):
+            pass
+
+        def alinear(self, ruta, texto, idioma):
+            Alineador.llamadas += 1
+            palabras = str(texto).split() or ["."]
+            return [{"w": p, "s": round(i * 0.2, 3), "e": round(i * 0.2 + 0.15, 3)}
+                    for i, p in enumerate(palabras)]
+
+    class Mezcla:
+        def mp3_a_pcm(self, contenido):
+            return b"\x00\x00" * 44100
+
+        def unir(self, pcms, aire):
+            return real.unir(pcms, aire)
+
+        def duracion_pcm(self, pcm):
+            return real.duracion_pcm(pcm)
+
+        def wav_desde_pcm(self, pcm):
+            return real.wav_desde_pcm(pcm)
+
+    class Sesion:
+        def __init__(self, ficha):
+            self.posts = []
+            self.ficha = ficha
+            self.polls = 0
+
+        def post(self, url, json=None, timeout=None):
+            self.posts.append((url, json))
+            if str(url).endswith("/estimate"):
+                return Respuesta(200, {"characters": len((json or {}).get("content") or "")})
+            return Respuesta(200, {"id": "lyra-1", "status": "pending", "provider": "lyra"})
+
+        def get(self, url, timeout=None, params=None):
+            if "media" in url or str(url).endswith(".mp3"):
+                return Respuesta(200, contenido=b"ID3falso")
+            self.polls += 1
+            if self.polls == 1:
+                return Respuesta(200, {"id": "lyra-1", "status": "processing", "result": ""})
+            return Respuesta(200, self.ficha)
+
+    def correr(cfg, texto, ficha, tope=""):
+        sesion = Sesion(ficha)
+        anterior_sueno, anterior_poll = voz.time.sleep, voz.POLL_S
+        voz._AUDIO = Mezcla()
+        voz._ALINEADOR = Alineador()
+        Alineador.llamadas = 0
+        voz.time.sleep = lambda *_a, **_k: None
+        voz.POLL_S = 0
+        voz._sesion = lambda clave: sesion
+        os.environ["GENAIPRO_API_KEY"] = "jwt-prueba-lyra"
+        if tope:
+            os.environ["GENAIPRO_LYRA_MAX_CHARS"] = tope
+        else:
+            os.environ.pop("GENAIPRO_LYRA_MAX_CHARS", None)
+        try:
+            wav, duracion, palabras = voz.toma(texto, cfg, lambda *_a, **_k: None)
+        finally:
+            voz.time.sleep, voz.POLL_S = anterior_sueno, anterior_poll
+            voz._sesion = sesion_original
+            os.environ.pop("GENAIPRO_API_KEY", None)
+            os.environ.pop("GENAIPRO_LYRA_MAX_CHARS", None)
+        return sesion, wav, duracion, palabras
+
+    ficha = {
+        "id": "lyra-1", "status": "completed", "provider": "lyra",
+        "result": "https://media.genaipro.io/audio/lyra-1.mp3",
+    }
+    sesion, wav, _duracion, palabras = correr(
+        {"voz_id": "id-de-cartesia-0123456789", "idioma": "es", "velocidad": "normal"},
+        "Hola mundo desde Lyra.", ficha)
+    altas = [cuerpo for url, cuerpo in sesion.posts if url.endswith("/tts/lyra")]
+    igual(len(altas), 1, "un guion corto es una sola tarea")
+    comprobar("voice_id" not in altas[0], "el defecto no manda voice_id")
+    igual(altas[0].get("voice_asset_id"), voz.VOZ_CLON_DEFECTO, "manda el clon de fabrica")
+    igual(altas[0].get("language"), "es", "el idioma viaja como es")
+    igual(altas[0].get("content"), "Hola mundo desde Lyra.", "el texto va en content")
+    comprobar(any(url.endswith("/tts/lyra/estimate") for url, _c in sesion.posts),
+              "el coste se estima antes, y es gratis")
+    comprobar(not any("/labs/task/subtitle" in url for url, _c in sesion.posts),
+              "un id de Lyra no se manda al subtitulo de Labs")
+    comprobar(Alineador.llamadas == 1, "sin tiempos en la respuesta alinea en local")
+    comprobar(wav[:4] == b"RIFF" and palabras[0]["w"] == "Hola", "devuelve wav y palabras")
+    comprobar(voz.toma.creditos == len("Hola mundo desde Lyra."),
+              "los creditos son los caracteres estimados")
+
+    ficha_tiempos = dict(ficha, word_timestamps={
+        "words": ["Hola", "mundo"], "start": [0.1, 0.4], "end": [0.3, 0.8]})
+    sesion, _w, _d, palabras = correr(
+        {"voz_origen": "preset", "voz_id": "preset-lyra-99", "idioma": "en"},
+        "Hola mundo", ficha_tiempos)
+    alta = [c for u, c in sesion.posts if u.endswith("/tts/lyra")][0]
+    igual(alta.get("voice_id"), "preset-lyra-99", "el preset va en voice_id")
+    comprobar("voice_asset_id" not in alta, "y no viaja el clon a la vez")
+    igual(alta.get("language"), "en", "un video en ingles no se fuerza a es")
+    igual(Alineador.llamadas, 0, "si la respuesta trae tiempos, no se alinea")
+    igual([p["w"] for p in palabras], ["Hola", "mundo"], "y se usan esos tiempos")
+    igual(palabras[0]["s"], 0.1, "con su inicio")
+
+    vtt = "WEBVTT\n\n00:00.000 --> 00:00.400\nHola mundo\n"
+    sesion, _w, _d, palabras = correr(
+        {"voz_origen": "clon", "voice_asset_id": voz.VOZ_CLON_DEFECTO,
+         "voz_id": voz.VOZ_CLON_DEFECTO, "idioma": "es", "emociones": ["curiosity"]},
+        "Hola mundo", dict(ficha, subtitle=vtt))
+    alta = [c for u, c in sesion.posts if u.endswith("/tts/lyra")][0]
+    comprobar("emotion" not in alta, "curiosity no tiene equivalente y no se manda")
+    igual(Alineador.llamadas, 0, "un subtitulo usable se prefiere al alineador")
+    igual([p["w"] for p in palabras], ["Hola", "mundo"], "y reparte el cue")
+
+    texto = ("Esta frase es bastante larga para partirla. " * 4).strip()
+    sesion, _w, _d, palabras = correr({"idioma": "es"}, texto, ficha, tope="80")
+    altas = [c for u, c in sesion.posts if u.endswith("/tts/lyra")]
+    comprobar(len(altas) > 1, "con tope explicito un guion largo se parte")
+    comprobar(all(len(c["content"]) <= 80 for c in altas), "ningun trozo pasa del tope")
+    comprobar(palabras[-1]["s"] > palabras[0]["e"],
+              "los tiempos del segundo trozo siguen a los del primero")
+
+    sesion = Sesion(ficha)
+
+    def post_sin_saldo(url, json=None, timeout=None):
+        sesion.posts.append((url, json))
+        if str(url).endswith("/estimate"):
+            return Respuesta(500, {"error": "estimate down"})
+        return Respuesta(400, {"error": "Not enough credit"})
+
+    sesion.post = post_sin_saldo
+    voz._sesion = lambda clave: sesion
+    voz.time.sleep = lambda *_a, **_k: None
+    os.environ["GENAIPRO_API_KEY"] = "jwt-prueba-lyra"
+    try:
+        try:
+            voz.toma("Hola", {"idioma": "es"}, lambda *_a, **_k: None)
+            comprobar(False, "sin credito tenia que parar")
+        except RuntimeError as fallo:
+            comprobar("credito" in str(fallo).lower(),
+                      "sin credito se dice para recargar, no como un HTTP opaco")
+        comprobar(any(u.endswith("/tts/lyra") for u, _c in sesion.posts),
+                  "fallar la estimacion no impide intentar la toma")
+    finally:
+        voz._sesion = sesion_original
+        voz.time.sleep = __import__("time").sleep
+        os.environ.pop("GENAIPRO_API_KEY", None)
+
+    class Catalogo:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, timeout=None, params=None):
+            self.urls.append(url)
+            if url.endswith("/voice-assets"):
+                return Respuesta(200, {"items": [
+                    {"id": voz.VOZ_CLON_DEFECTO, "title": "voz propia 2", "status": "ready"},
+                    {"id": "roto-roto-roto-roto", "title": "mal", "status": "failed"},
+                ], "total": 2, "page": 1, "limit": 20})
+            return Respuesta(200, {"voices": [
+                {"id": "preset-lyra-99", "name": "Lucia", "language": "es"},
+                {"id": "preset-en-99", "name": "Ann", "language": "en"},
+            ], "has_more": False})
+
+        def post(self, url, json=None, timeout=None):
+            raise AssertionError("listar voces no crea tareas")
+
+    catalogo = Catalogo()
+    voz._sesion = lambda clave: catalogo
+    os.environ["GENAIPRO_API_KEY"] = "jwt-prueba-lyra"
+    cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "cache", "voces_genaipro_lyra.json")
+    try:
+        if os.path.exists(cache):
+            os.remove(cache)
+        fichas = voz.listar_voces("es", refrescar=True)
+    finally:
+        voz._sesion = sesion_original
+        os.environ.pop("GENAIPRO_API_KEY", None)
+        if os.path.exists(cache):
+            os.remove(cache)
+    clon = next(f for f in fichas if f["id"] == voz.VOZ_CLON_DEFECTO)
+    comprobar(clon["publica"] is False and clon["clon"] is True, "el clon va marcado")
+    igual(clon["nombre"], "voz propia 2", "y con su titulo")
+    comprobar(all(f["id"] != "roto-roto-roto-roto" for f in fichas), "un clon fallido no entra")
+    preset = next(f for f in fichas if f["id"] == "preset-lyra-99")
+    comprobar(preset["publica"] is True and preset.get("voice_id") == preset["id"],
+              "un preset de Lyra es voz publica")
+    comprobar(all(f["id"] != "preset-en-99" for f in fichas), "un preset de otro idioma no se cuela")
+    comprobar(any(u.endswith("/tts/voice-assets") for u in catalogo.urls)
+              and any(u.endswith("/tts/lyra/voices") for u in catalogo.urls),
+              "el catalogo pide clones y presets, no Labs")
+
+
 def prueba_alineador():
     print("alineador")
     alinear = medios.motor("alineador/alinear.py")
@@ -491,6 +741,7 @@ def main():
     prueba_snapgen_red()
     prueba_simular()
     prueba_voz()
+    prueba_lyra()
     prueba_alineador()
     prueba_comprobar()
     print()

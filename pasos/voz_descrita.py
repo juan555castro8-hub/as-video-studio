@@ -103,6 +103,34 @@ DEVUELVE EXACTAMENTE ESTE JSON, sin nada alrededor:
 """
 
 
+def _nombre_catalogo():
+    try:
+        from . import claves
+    except ImportError:
+        import claves
+    try:
+        if claves.proveedor_voz() == "genaipro":
+            return "GenAI Pro"
+    except Exception:  # noqa: BLE001
+        pass
+    return "Cartesia"
+
+
+def _marcar_origen(elegido, idioma):
+    """Clon o preset de Lyra, segun la ficha. Cartesia no lleva estas claves."""
+    fichas = p4_voz.listar_voces(idioma or "es")
+    ficha = next((f for f in fichas if f.get("id") == elegido.get("voz_id")), None)
+    if not ficha or ficha.get("proveedor") != "genaipro":
+        return elegido
+    if ficha.get("clon") or not ficha.get("publica", True):
+        elegido["voz_origen"] = "clon"
+        elegido["voice_asset_id"] = ficha.get("voice_asset_id") or ficha["id"]
+    else:
+        elegido["voz_origen"] = "preset"
+        elegido["voice_asset_id"] = ""
+    return elegido
+
+
 def _voces_para_instruccion(idioma, voz_fija=""):
     """Catalogo recortado a lo que ayuda a decidir: propias y nativas primero.
 
@@ -124,8 +152,8 @@ def _voces_para_instruccion(idioma, voz_fija=""):
                       + ("  [VOZ PROPIA DEL CANAL, clonada]" if propia else "")
                       + ("" if ficha.get("nativa", True) else "  [no nativa]"))
     if not lineas:
-        raise RuntimeError(f"no hay ninguna voz de Cartesia para el idioma "
-                           f"{idioma!r}: no se puede elegir por descripcion")
+        raise RuntimeError(f"no hay ninguna voz de {_nombre_catalogo()} para el "
+                           f"idioma {idioma!r}: no se puede elegir por descripcion")
     return "\n".join(lineas), {f["id"] for f in recorte}
 
 
@@ -183,8 +211,8 @@ def proponer(encargo, idioma="es", ajuste=None, avisar=None, proyecto_id=None,
     voces, ids = _voces_para_instruccion(idioma, voz_fija)
     if voz_fija and voz_fija not in ids:
         raise RuntimeError(f"la voz elegida a mano ({voz_fija}) no esta en el "
-                           f"catalogo de esta cuenta de Cartesia para "
-                           f"{idioma!r}: revisa la clave o el idioma")
+                           f"catalogo de esta cuenta de {_nombre_catalogo()} "
+                           f"para {idioma!r}: revisa la clave o el idioma")
     por_fase = cli_claude.por_defecto_de(PASO)
     ajuste = ajuste or {"modelo": por_fase["modelo"],
                         "esfuerzo": por_fase["esfuerzo"]}
@@ -225,6 +253,7 @@ def proponer(encargo, idioma="es", ajuste=None, avisar=None, proyecto_id=None,
         nombre = next((f.get("nombre") for f in p4_voz.listar_voces(idioma or "es")
                        if f["id"] == voz_fija), "")
         elegido["voz_nombre"] = nombre or elegido.get("voz_nombre") or voz_fija
+    _marcar_origen(elegido, idioma)
     elegido["tokens"] = comun.tokens_de_cli(sobre)
     avisa(1.0, f"«{elegido['voz_nombre'] or elegido['voz_id']}» · "
                f"{elegido['velocidad']} · "

@@ -16,14 +16,25 @@ proyecto: hay que instalar el de Mahmoud Ashraf desde git.
     pip install -r requirements-alineador.txt
 
 La primera llamada baja el modelo MMS-300M (~1,2 GB) a ESTUDIO_MODELOS.
-Ese modelo va con licencia CC-BY-NC: para un uso comercial se cambia
-ESTUDIO_ALINEADOR_MODELO por otro modelo CTC compatible.
+Ese modelo va con licencia CC-BY-NC. Para un uso comercial se cambia
+ESTUDIO_ALINEADOR_MODELO por otro checkpoint que este cargador acepte
+(Wav2Vec2ForCTC, HuBERT o MMS). Uno con licencia Apache-2.0 y castellano,
+del mismo tipo, es jonatasgrosman/wav2vec2-large-xlsr-53-spanish:
+
+    ESTUDIO_ALINEADOR_MODELO=jonatasgrosman/wav2vec2-large-xlsr-53-spanish
+
+No es el defecto: no se ha medido aqui su alineado. Qwen3-ForcedAligner
+tambien es Apache-2.0 y lista el castellano, pero no entra por esta
+variable: no es un modelo CTC de este cargador.
 """
 import os
 
 IDIOMAS = {"es": "spa", "en": "eng", "pt": "por", "fr": "fra", "de": "deu",
            "it": "ita", "ca": "cat"}
 MODELO_POR_DEFECTO = "MahmoudAshraf/mms-300m-1130-forced-aligner"
+#: Wav2Vec2ForCTC, Apache-2.0, castellano. El cargador lo acepta; no es el
+#: defecto porque no se ha medido su alineado en este estudio.
+MODELO_COMERCIAL_ES = "jonatasgrosman/wav2vec2-large-xlsr-53-spanish"
 
 _MODELO = {}
 

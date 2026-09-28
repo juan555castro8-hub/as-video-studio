@@ -361,6 +361,8 @@ def resolver_params(params):
         "preset": nombre_preset or None,
         "modelo": modelo,
         "voz_id": voz_id,
+        "voz_origen": str(crudos.get("voz_origen") or "").strip(),
+        "voice_asset_id": str(crudos.get("voice_asset_id") or "").strip(),
         "idioma": idioma,
         "velocidad": velocidad,
         "emociones": emociones,
@@ -912,16 +914,26 @@ def _proveedor_voz():
 def _toma_genaipro(texto, cfg, progreso):
     """La toma de GenAI Pro. Cartesia sigue en `_toma_real`."""
     motor_g = comun.cargar_motor("voz_genaipro", "voz.py")
-    avisos = []
-    preparado = marcas_tts.para_genaipro(texto, avisos)
-    for aviso in avisos:
-        progreso(0.02, aviso)
+    _toma_genaipro.creditos = None
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if motor_g.motor_de_toma(cfg) == "lyra":
+        preparado = marcas_tts.limpiar(texto)
+        if marcas_tts.hay_marcas(texto):
+            progreso(0.02, "Lyra locuta el texto sin etiquetas de Cartesia")
+    else:
+        avisos = []
+        preparado = marcas_tts.para_genaipro(texto, avisos)
+        for aviso in avisos:
+            progreso(0.02, aviso)
     wav, duracion, palabras = motor_g.toma(preparado, cfg, progreso)
     _toma_genaipro.marcas = getattr(motor_g.toma, "marcas", "")
+    _toma_genaipro.creditos = getattr(motor_g.toma, "creditos", None)
     return wav, duracion, palabras
 
 
 _toma_genaipro.marcas = ""
+_toma_genaipro.creditos = None
 
 
 def sintetizar_toma(texto, cfg, progreso=None):
@@ -1224,10 +1236,13 @@ def previsualizar(proyecto, params, segundos=20):
     if not texto:
         raise RuntimeError("el guion no tiene texto que previsualizar")
 
+    piezas = [texto, cfg["modelo"], cfg["voz_id"], cfg["idioma"],
+              cfg["experimental_controls"], simulado()]
+    if _proveedor_voz() == "genaipro":
+        motor_g = comun.cargar_motor("voz_genaipro", "voz.py")
+        piezas.append(motor_g.firma_de_voz(cfg))
     firma = hashlib.sha256(json.dumps(
-        [texto, cfg["modelo"], cfg["voz_id"], cfg["idioma"],
-         cfg["experimental_controls"], simulado()],
-        sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+        piezas, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
     carpeta = proyecto.ruta("previsualizaciones")
     os.makedirs(carpeta, exist_ok=True)
     ruta = os.path.join(carpeta, f"voz_{firma}.wav")

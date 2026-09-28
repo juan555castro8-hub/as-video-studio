@@ -40,7 +40,7 @@
   "genaipro": {
     "modelo": "eleven_multilingual_v2",
     "usd_por_caracter": null,
-    "nota": "GenAI Pro no publica un precio por caracter que se pueda dejar fijo aqui. null significa que no se sabe: el medidor anota los caracteres y el importe sale como sin tarifa hasta que se rellene este campo."
+    "nota": "Lyra cobra 1 credito por caracter (unidades del codificador, no puntos de codigo) y Labs no publica un dolar por caracter. null significa que el importe en dolares no se sabe: el medidor anota los caracteres y, si Lyra estimo, los creditos, y sale como sin tarifa hasta que se rellene este campo."
   },
   "claude_cli": {
     "suma_al_total": false,

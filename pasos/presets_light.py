@@ -564,8 +564,16 @@ def validar_encargo(crudo):
     # --pone la velocidad y el color-- pero la voz no se elige: es esa.
     voz_id = " ".join(str(datos.get("voz_id") or "").split())
     if voz_id and not re.match(r"^[A-Za-z0-9_-]{8,64}$", voz_id):
-        raise ErrorEncargo("«voz_id» no parece un id de voz de Cartesia")
+        raise ErrorEncargo("«voz_id» no parece un id de voz")
     limpio["voz_id"] = voz_id
+    origen = " ".join(str(datos.get("voz_origen") or "").split()).lower()
+    if origen and origen not in ("clon", "preset"):
+        raise ErrorEncargo("«voz_origen» es clon o preset")
+    limpio["voz_origen"] = origen
+    asset = " ".join(str(datos.get("voice_asset_id") or "").split())
+    if asset and not re.match(r"^[A-Za-z0-9_-]{8,80}$", asset):
+        raise ErrorEncargo("«voice_asset_id» no parece un id de clon")
+    limpio["voice_asset_id"] = asset
 
     # AQUI NO HAY PERSONAJES DEL CANAL NI LLAMADAS A LA ACCION, y las dos
     # ausencias son decisiones:
